@@ -1,0 +1,502 @@
+---
+title: "Buckeye & BCI Coverage Map"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: 
+      version: 4
+      bootswatch: minty
+    orientation: rows
+    vertical_layout: fill
+    logo: https://graingp.com/wp-content/uploads/2021/05/logo.svg
+runtime: shiny
+resource_files:
+  - buckeye_bci_cb_stats.csv
+
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(flexdashboard)
+#library(crosstalk)
+library(shiny)
+library(shinythemes)
+library(htmlwidgets)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+library(tidycensus)
+library(memoise)
+```
+
+
+```{r, include=FALSE}
+buckbci_src <- read_csv("buckeye_bci_cb_stats.csv") %>%
+  janitor::clean_names() %>%
+  mutate(GEOID = as.character(census_block),
+         ilec = case_when(
+    grepl("AT&T", top_copper_providers, ignore.case = TRUE) & !grepl("AT&T", top_fiber_providers, ignore.case = TRUE) ~ "AT&T DSL",
+    grepl("AT&T", top_fiber_providers, ignore.case = TRUE)  ~ "AT&T FIBER",
+    grepl("FRONTIER", top_copper_providers, ignore.case = TRUE) & !grepl("FRONTIER", top_fiber_providers, ignore.case = TRUE) ~ "FRONTIER DSL",
+    grepl("FRONTIER", top_fiber_providers, ignore.case = TRUE)  ~ "FRONTIER FIBER",
+    TRUE ~ "NON AT&T/FRONTIER"  # Use NA for rows that don't match
+  )
+  #,
+  #
+  ## Classify `fiber_flag` based on `top_fiber_providers`
+  #fiber_flag = case_when(
+  #  grepl("AT&T", top_fiber_providers, ignore.case = TRUE) & 
+  #    !grepl("FRONTIER", top_fiber_providers, ignore.case = TRUE) ~ "AT&T FIBER",
+  #  
+  #  grepl("FRONTIER", top_fiber_providers, ignore.case = TRUE) & 
+  #    !grepl("AT&T", top_fiber_providers, ignore.case = TRUE) ~ "FRONTIER FIBER",
+  #  
+  #  TRUE ~ "0"  # Default to "0" if neither AT&T Fiber nor Frontier Fiber is found
+  #)
+)
+
+# Load the cached census data from the local .rds file
+geo_blocks <- readRDS("census_data.rds") %>%
+  mutate(GEOID = as.character(GEOID))  # Ensure GEOID is character type
+
+# Set up Census API and retrieve Ohio block data
+#options(tigris_use_cache = TRUE)
+#census_api_key('d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9', install = TRUE, overwrite = TRUE)
+
+# Define variable(s) and retrieve decennial data with geometry
+#vars20 <- c("P1_001N")
+#geo_blocks <- get_decennial(
+#  geography = "block",
+#  variables = vars20,
+#  year = 2020,
+#  summary_var = "P1_001N",
+#  state = c("OH","MI","PA","AL","MS"),
+#  geometry = TRUE
+#) %>%
+#  mutate(GEOID = as.character(GEOID))
+
+buckbci_joined <- inner_join(buckbci_src,geo_blocks, by = "GEOID")
+
+buckbci_df_sf <- sf::st_as_sf(buckbci_joined)
+
+buckbci_df_sft <- st_transform(buckbci_df_sf, crs = 4326)
+
+# Create a directory to write the geojson file
+#dir.create("C:/Temp", recursive = TRUE, showWarnings = FALSE)
+# Write to geojson format
+#sf::st_write(buckbci_df_sf, "C:/Temp/buckbci_df_sf.geojson")
+# Write to Shapefile format option (Note: column names cannot exceed 10 charaacters)
+#sf::st_write(buckbci_df_sf, "C:\\Temp\\buckbci_df_sf.shp")
+```
+
+Coverage Map {data-icon="fas fa-map-marked-alt"}
+==================================================
+
+
+Column {.sidebar data-width=325}
+----------------------------------------------------
+
+
+```{r}
+# Create placeholder for the downloadButton
+uiOutput("downloadUI")
+```
+
+```{r}
+ filtered_data <- reactive({
+  buckbci_df_sft %>%
+    filter(
+      # Keep all rows where the brand name matches the input, or no brand is selected
+      (is.null(input$brand_name) | brand_name %in% input$brand_name),
+      
+      # Apply ilec filter but allow "Other" areas to remain regardless of ilec selection
+      (is.null(input$ilec) | ilec %in% input$ilec | ilec == "NON AT&T/FRONTIER")
+    )
+})
+
+#filtered_data <- reactive({
+#  req(input$brand_name)  # Ensure brand_name is selected
+#  
+#  # Filter based on brand_name
+#  filtered <- buckbci_df_sft %>% 
+#    filter(brand_name %in% input$brand_name)
+#  
+#  # Further filter based on top_copper_providers if it has a selection
+#  if (!is.null(input$top_copper_providers) && length(input$top_copper_providers) > 0) {
+#    filtered <- filtered %>%
+#      filter(ilec %in% input$top_copper_providers)
+#  }
+  
+  # Further filter based on fiber_flag if it has a selection
+  #if (!is.null(input$fiber_flag) && length(input$fiber_flag) > 0) {
+  #  filtered <- filtered %>%
+  #    filter(fiber_flag %in% input$fiber_flag)
+  #}
+  
+  # Add color_category based on conditions
+  #filtered %>%
+  #  mutate(
+  #    color_category = case_when(
+  #      ilec == "AT&T DSL"  ~ "AT&T FIBER",  # AT&T with fiber -> dark green
+  #      ilec == "AT&T" & fiber_flag == "0" ~ "AT&T DSL",             # AT&T without fiber -> green
+  #      ilec == "FRONTIER" & fiber_flag == "FRONTIER FIBER" ~ "FRONTIER FIBER", # Frontier with fiber -> dark red
+  #      ilec == "FRONTIER" & fiber_flag == "0" ~ "FRONTIER DSL",     # Frontier without fiber -> red
+  #      TRUE ~ "Other"                                               # Non-AT&T/Frontier areas -> gray
+  #    )
+  #  )
+#})
+
+
+```
+
+### <font size="5">**Filters**</font> 
+
+<!-- ```{r filter_1} -->
+<!-- # UI inputs -->
+<!-- selectizeInput("brand_name",  -->
+<!--                "Step 1: Select Provider Name(s):",  -->
+<!--                choices = NULL,  # Choices will be dynamically updated -->
+<!--                selected = NULL,  -->
+<!--                multiple = TRUE,  -->
+<!--                options = list(placeholder = 'Type to search for provider name(s)',  -->
+<!--                               maxOptions = 2)) -->
+
+<!-- selectizeInput("state_name",  -->
+<!--                "Step 2: Select State Name(s):",  -->
+<!--                choices = NULL,  # Choices will be dynamically updated -->
+<!--                selected = NULL,  -->
+<!--                multiple = TRUE,  -->
+<!--                options = list(placeholder = 'Type to search for state name(s)',  -->
+<!--                               maxOptions = 5)) -->
+
+<!-- selectizeInput("county_name",  -->
+<!--                "Step 3: Select County Name(s):",  -->
+<!--                choices = NULL,  # Choices will be dynamically updated -->
+<!--                selected = NULL,  -->
+<!--                multiple = TRUE,  -->
+<!--                options = list(placeholder = 'Type to search for county name(s)',  -->
+<!--                               maxOptions = 1000)) -->
+
+<!-- selectizeInput("usps_zip_pref_city",  -->
+<!--                "Step 4: Select City Name(s):",  -->
+<!--                choices = NULL,  # Choices will be dynamically updated -->
+<!--                selected = NULL,  -->
+<!--                multiple = TRUE,  -->
+<!--                options = list(placeholder = 'Type to search for city name(s)',  -->
+<!--                               maxOptions = 1000)) -->
+
+<!-- selectizeInput("top_fiber_providers",  -->
+<!--                "Step 5: Select FTTH Providers(s):",  -->
+<!--                choices = NULL,  # Choices will be dynamically updated -->
+<!--                selected = NULL,  -->
+<!--                multiple = TRUE,  -->
+<!--                options = list(placeholder = 'Type to search for FTTH provider(s)',  -->
+<!--                               maxOptions = 1000)) -->
+
+<!-- # Add reset button -->
+<!-- actionButton("reset_filters", "Reset Filters", class = "btn btn-danger") -->
+
+<!-- # STEP 1: Observe for dynamically updating 'brand_name' (provider names) -->
+<!-- observe({ -->
+<!--   # Filter data to retrieve unique brand names -->
+<!--   filtered_data_brand <- buckbci_df_sft %>% -->
+<!--     select(brand_name)  # Only select the column you need -->
+
+<!--   # Update the 'brand_name' choices based on unique values in filtered_data -->
+<!--   updateSelectizeInput(session, "brand_name", -->
+<!--                        choices = unique(filtered_data_brand$brand_name), -->
+<!--                        selected = NULL,  # Reset selection when filter changes -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- # STEP 2: Observe for dynamically updating 'state_name' based on selected 'brand_name' -->
+<!-- observe({ -->
+<!--   req(input$brand_name)  # Ensure 'brand_name' input is selected before updating -->
+
+<!--   # Filter data based on selected 'brand_name' -->
+<!--   filtered_data_state_name <- buckbci_df_sft %>% -->
+<!--     filter(brand_name %in% input$brand_name) %>% -->
+<!--     select(state_name)  # Only select relevant column -->
+
+<!--   # Update the 'state_name' choices based on the filtered data -->
+<!--   updateSelectizeInput(session, "state_name", -->
+<!--                        choices = sort(unique(filtered_data_state_name$state_name)), -->
+<!--                        selected = NULL,  # Reset selection when filters change -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- # STEP 3: Observe for dynamically updating 'county_name' based on selected 'state_name' -->
+<!-- observe({ -->
+<!--   req(input$state_name)  # Ensure 'state_name' input is selected before updating -->
+
+<!--   # Filter data based on selected 'state_name' -->
+<!--   filtered_data_county_name <- buckbci_df_sft %>% -->
+<!--     filter(state_name %in% input$state_name) %>% -->
+<!--     select(county_name)  # Only select relevant column -->
+
+<!--   # Update the 'county_name' choices based on the filtered data -->
+<!--   updateSelectizeInput(session, "county_name", -->
+<!--                        choices = sort(unique(filtered_data_county_name$county_name)), -->
+<!--                        selected = NULL,  # Reset selection when filters change -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- # STEP 3: Observe for dynamically updating 'county_name' based on selected 'state_name' -->
+<!-- observe({ -->
+<!--   req(input$county_name)  # Ensure 'state_name' input is selected before updating -->
+
+<!--   # Filter data based on selected 'state_name' -->
+<!--   filtered_data_city_name <- buckbci_df_sft %>% -->
+<!--     filter(county_name %in% input$county_name) %>% -->
+<!--     select(usps_zip_pref_city)  # Only select relevant column -->
+
+<!--   # Update the 'county_name' choices based on the filtered data -->
+<!--   updateSelectizeInput(session, "usps_zip_pref_city", -->
+<!--                        choices = sort(unique(filtered_data_city_name$usps_zip_pref_city)), -->
+<!--                        selected = NULL,  # Reset selection when filters change -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- # STEP 3: Observe for dynamically updating 'county_name' based on selected 'state_name' -->
+<!-- observe({ -->
+<!--   req(input$county_name)  # Ensure 'state_name' input is selected before updating -->
+
+<!--   # Filter data based on selected 'state_name' -->
+<!--   filtered_data_top_ftth <- buckbci_df_sft %>% -->
+<!--     filter(usps_zip_pref_city %in% input$usps_zip_pref_city) %>% -->
+<!--     select(top_fiber_providers)  # Only select relevant column -->
+
+<!--   # Update the 'county_name' choices based on the filtered data -->
+<!--   updateSelectizeInput(session, "top_fiber_providers", -->
+<!--                        choices = sort(unique(filtered_data_top_ftth$top_fiber_providers)), -->
+<!--                        selected = NULL,  # Reset selection when filters change -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- # Observe event to reset filters -->
+<!-- observeEvent(input$reset_filters, { -->
+<!--   updateSelectizeInput(session, "brand_name", selected = NULL, server = TRUE) -->
+<!--   updateSelectizeInput(session, "state_name", selected = NULL, server = TRUE) -->
+<!--   updateSelectizeInput(session, "county_name", selected = NULL, server = TRUE) -->
+<!--   updateSelectizeInput(session, "usps_zip_pref_city", selected = NULL, server = TRUE) -->
+<!--   updateSelectizeInput(session, "top_fiber_providers", selected = NULL, server = TRUE) -->
+
+<!--   # Explicitly update the choices for brand_name -->
+<!--   filtered_data_brand <- buckbci_df_sft %>% -->
+<!--     select(brand_name)  # Select unique brand names -->
+
+<!--   # Update brand_name choices -->
+<!--   updateSelectizeInput(session, "brand_name", -->
+<!--                        choices = unique(filtered_data_brand$brand_name), -->
+<!--                        selected = NULL,  # Reset selection -->
+<!--                        server = TRUE) -->
+<!-- }) -->
+
+<!-- ``` -->
+
+```{r filter_1}
+# UI Elements
+selectizeInput("brand_name", 
+               "Step 1: Select Provider Name(s):", 
+               choices = unique(buckbci_df_sft$brand_name),  # Set initial choices to populate at load
+               selected = NULL, 
+               multiple = TRUE, 
+               options = list(placeholder = 'Type to search for provider name(s)', 
+                              maxOptions = 2))
+
+selectizeInput("ilec", 
+               "Step 2: Select ILEC Providers(s):", 
+               choices = unique(buckbci_df_sft$ilec),  # Set initial choices to populate at load
+               selected = NULL, 
+               multiple = TRUE, 
+               options = list(placeholder = 'Type to search for ILEC provider(s)', 
+                              maxOptions = 10))
+
+#checkboxGroupInput("fiber_flag", 
+#                   "Step 3: Select Fiber Flag:", 
+#                   choices = unique(buckbci_df_sft$fiber_flag), 
+#                   selected = NULL)
+
+# Action button to reset filters
+actionButton("reset_filters", "Reset Filters", class = "btn btn-danger")
+
+# Server Side Code
+# STEP 1: Observe for dynamically updating 'brand_name' (provider names)
+# STEP 1: Observe for dynamically updating 'brand_name' (provider names)
+# STEP 1: Observe for dynamically updating 'brand_name' (provider names)
+# Observe to dynamically update brand_name choices based on any filters applied
+observe({
+  filtered_data_brand <- buckbci_df_sft %>%
+    select(brand_name)  # Select only the relevant column
+
+  # Update the 'brand_name' choices based on filtered data
+  updateSelectizeInput(session, "brand_name",
+                       choices = unique(filtered_data_brand$brand_name),
+                       selected = NULL,  # Reset selection when filter changes
+                       server = TRUE)
+})
+
+# Observe for dynamically updating 'top_copper_providers' based on selected 'brand_name'
+observe({
+  req(input$brand_name)  # Ensure 'brand_name' input is selected before updating
+  
+  # Filter data based on selected 'brand_name'
+  filtered_data_ilec_name <- buckbci_df_sft %>%
+    filter(brand_name %in% input$brand_name) %>%
+    select(ilec)  # Only select relevant column
+  
+  # Update 'top_copper_providers' choices based on the selected brand_name
+  updateSelectizeInput(session, "ilec",
+                       choices = sort(unique(filtered_data_ilec_name$ilec)),
+                       selected = NULL,  # Reset selection when filters change
+                       server = TRUE)
+})
+
+# Reset filters functionality
+observeEvent(input$reset_filters, {
+  updateSelectizeInput(session, "brand_name", selected = NULL, server = TRUE)
+  updateSelectizeInput(session, "ilec", selected = NULL, server = TRUE)
+  
+  # Reset 'brand_name' choices dynamically
+  filtered_data_brand <- buckbci_df_sft %>%
+    select(brand_name)  # Select unique brand names
+  
+  updateSelectizeInput(session, "brand_name",
+                       choices = unique(filtered_data_brand$brand_name),
+                       selected = NULL,  # Reset selection
+                       server = TRUE)
+})
+
+
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="5">**Provider Broadband Coverage by Census Block**</font>
+
+<!-- ```{r, include=TRUE} -->
+<!-- renderLeaflet({ -->
+
+<!--   map_df <- filtered_data()   -->
+<!--   # Define the color palette function, expanding the domain to capture full range -->
+<!--   range_vals <- range(map_df$target_coverage_pct, na.rm = TRUE) -->
+
+<!--   colorPal <- colorNumeric( -->
+<!--     palette = colorRampPalette(colors = c("#b2182b", "#FFBB33", "#008000"))(100), -->
+<!--     domain = range_vals -->
+<!--   ) -->
+
+<!--   labels <- paste0( -->
+<!--     "<strong> Brand Name: </strong>", map_df$brand_name, "<br/>", -->
+<!--     "<strong> State: </strong>", map_df$state_name, "<br/>", -->
+<!--     "<strong> County: </strong>", map_df$county_name, "<br/>", -->
+<!--     "<strong> Total BSLs: </strong>", scales::comma(map_df$total_residential_location_ids, accuracy = 1), "<br/>", -->
+<!--     "<strong> Target BSLs: </strong>", scales::comma(map_df$target_residential_location_ids, accuracy = 1), "<br/>", -->
+<!--     "<strong> Target BSL Coverage: </strong>", scales::percent(map_df$target_coverage_pct, accuracy = 0.1), "<br/>", -->
+<!--     "<strong> Top Cable Providers: </strong>", map_df$top_cable_providers, "<br/>", -->
+<!--     "<strong> Top FTTH Providers: </strong>", map_df$top_fiber_providers, "<br/>", -->
+<!--     "<strong> Top FWA Providers: </strong>", map_df$top_fwa_providers, "<br/>", -->
+<!--     "<strong> Competitive Intensity: </strong>", map_df$ftth_competition, "<br/>" -->
+<!--     ) %>% -->
+<!--     lapply(htmltools::HTML) -->
+
+<!-- # Create the Leaflet map with dynamic colors based on buckeye_coverage_pct -->
+<!-- leaflet() %>% -->
+<!--   #addProviderTiles(providers$CartoDB.Positron) %>%  # Adds a clean basemap -->
+<!--   addProviderTiles(provider = "OpenStreetMap", options = providerTileOptions(opacity = 1)) %>% -->
+<!--   addPolygons( -->
+<!--     data = map_df, -->
+<!--     color = "#2E86C1",                              # Border color of the polygons -->
+<!--     weight = 1,                                     # Border thickness -->
+<!--     fillColor = ~colorPal(target_coverage_pct),    # Dynamic fill color based on palette -->
+<!--     fillOpacity = 0.6,                              # Opacity of the polygon fill -->
+<!--     label = labels,                                 # Label each polygon with its GEOID -->
+<!--     popup = labels -->
+<!--   ) %>% -->
+<!--   addLegend( -->
+<!--     position = "bottomright", -->
+<!--     pal = colorPal, -->
+<!--     values = map_df$target_coverage_pct, -->
+<!--     labFormat = function(type, value) { -->
+<!--       # Format legend values as percentages -->
+<!--       paste0(scales::percent(value, accuracy = 1)) -->
+<!--     }, -->
+<!--     title = "BSL Coverage (%)", -->
+<!--     opacity = 1 -->
+<!--   ) -->
+
+<!--   }) -->
+<!-- ``` -->
+
+
+```{r}
+renderLeaflet({
+  
+  # Use the filtered dataset based on user selections
+  map_df <- filtered_data()
+
+  map_df <- map_df %>%
+    mutate(
+      color_category = case_when(
+        # Set selected categories to their respective colors
+        ilec == "AT&T DSL" & "AT&T DSL" %in% input$ilec ~ "AT&T DSL",
+        ilec == "AT&T FIBER" & "AT&T FIBER" %in% input$ilec ~ "AT&T FIBER",
+        ilec == "FRONTIER DSL" & "FRONTIER DSL" %in% input$ilec ~ "FRONTIER DSL",
+        ilec == "FRONTIER FIBER" & "FRONTIER FIBER" %in% input$ilec ~ "FRONTIER FIBER",
+        
+        # Set unselected or unmatched areas to "OTHER" if not selected
+        TRUE ~ "NON AT&T/FRONTIER"
+      )
+    )
+  # Define a color palette for fiber_flag and ILEC (we will handle color categories manually)
+  fiberPal <- colorFactor(
+    palette = c("blue", "green", "darkgreen", "red", "darkred"),  # Define colors for each category
+    levels = c("NON AT&T/FRONTIER", "AT&T DSL", "AT&T FIBER", "FRONTIER DSL", "FRONTIER FIBER")  # Map levels to categories
+  )
+  
+  # Update labels for tooltips
+  labels <- paste0(
+    "<strong> Brand Name: </strong>", map_df$brand_name, "<br/>",
+    "<strong> State: </strong>", map_df$state_name, "<br/>",
+    "<strong> County: </strong>", map_df$county_name, "<br/>",
+    "<strong> City Name: </strong>", map_df$usps_zip_pref_city, "<br/>",
+    "<strong> Total BSLs: </strong>", scales::comma(map_df$total_residential_location_ids, accuracy = 1), "<br/>",
+    "<strong> Target BSLs: </strong>", scales::comma(map_df$target_residential_location_ids, accuracy = 1), "<br/>",
+    "<strong> Target BSL Coverage: </strong>", scales::percent(map_df$target_coverage_pct, accuracy = 0.1), "<br/>",
+    "<strong> Top Copper Providers: </strong>", map_df$top_copper_providers, "<br/>",
+    "<strong> Top Cable Providers: </strong>", map_df$top_cable_providers, "<br/>",
+    "<strong> Top FTTH Providers: </strong>", map_df$top_fiber_providers, "<br/>",
+    "<strong> Top FWA Providers: </strong>", map_df$top_fwa_providers, "<br/>",
+    "<strong> Competitive Intensity: </strong>", map_df$ftth_competition, "<br/>",
+    "<strong> LEC: </strong>", map_df$ilec, "<br/>"
+  ) %>%
+    lapply(htmltools::HTML)
+  
+  # Create the leaflet map with fiber flag and ILEC-specific colors
+  leaflet(data = map_df) %>%
+    addProviderTiles(providers$CartoDB.Positron) %>%
+    #addProviderTiles(provider = "OpenStreetMap", options = providerTileOptions(opacity = 1)) %>%
+    addPolygons(
+      color = "#2E86C1",                              # Border color
+      weight = 0,                                     # Border thickness
+      fillColor = ~fiberPal(color_category),          # Apply color based on `color_category`
+      fillOpacity = 0.7,                              # Opacity of the polygon fill
+      label = labels,                                 # Tooltip labels
+      popup = labels
+    ) %>%
+    addLegend(
+      position = "bottomright",
+      pal = fiberPal,
+      values = map_df$color_category,                 # Use 'color_category' for the legend
+      title = "DSL or Fiber Availability",
+      opacity = 1,
+      labels = c("NON AT&T/FRONTIER", "AT&T DSL", "AT&T FIBER", "FRONTIER DSL", "FRONTIER FIBER")  # Legend labels
+    )
+})
+
+
+
+
+```
+
