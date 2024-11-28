@@ -1,0 +1,716 @@
+---
+title: "123Net FTTH Opportunity "
+output: 
+  flexdashboard::flex_dashboard:
+    theme:
+      version: 4
+      bootswatch: minty
+      primary: "#6CC3D4"
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+resource_files:
+  - MARKET_SIZING_SCRIPT_BLOCK_LEVEL_R2.csv
+  - FULL_NETWORK_123NET_R2.kml
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(flexdashboard)
+library(crosstalk)
+library(shiny)
+library(shinythemes)
+library(htmlwidgets)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+library(tidycensus)
+library(scales)
+```
+
+
+```{r, include=FALSE}
+
+mi_fcc_stats <- read.csv('MARKET_SIZING_SCRIPT_BLOCK_LEVEL_R2.csv') %>% 
+  mutate(GEOID = as.character(CENSUS_BLOCK),
+         TOTAL_SERVED_LOCATIONS = TOTAL_RESIDENTIAL_LOCATION_IDS-UNSERVED_PLUS_UNDERSERVED,
+         BEAD_PER_ROAD_MILE = ifelse(UNSERVED_PLUS_UNDERSERVED==0 | ROAD_MILES==0, 0, UNSERVED_PLUS_UNDERSERVED/ROAD_MILES),
+         BEAD_ELIGIBLE = UNSERVED_PLUS_UNDERSERVED/TOT_HOUSING_UNITS_ACS_16_20) %>%
+  mutate_if(is.numeric , replace_na, replace = 0) %>%
+  filter(COUNTY_NAME %in% 
+           c('ARENAC COUNTY',
+             'BAY COUNTY',
+             'CALHOUN COUNTY',
+             'GENESEE COUNTY',
+             'GRATIOT COUNTY',
+             'INGHAM COUNTY',
+             'ISABELLA COUNTY',
+             'JACKSON COUNTY',
+             'KALAMAZOO COUNTY',
+             'KENT COUNTY',
+             'LIVINGSTON COUNTY',
+             'MACOMB COUNTY',
+             'MASON COUNTY',
+             'MIDLAND COUNTY',
+             'MUSKEGON COUNTY',
+             'OAKLAND COUNTY',
+             'OTTAWA COUNTY',
+             'SAGINAW COUNTY',
+             'SHIAWASSEE COUNTY',
+             'ST. CLAIR COUNTY',
+             'WASHTENAW COUNTY',
+             'WAYNE COUNTY',
+             'ALLEGAN COUNTY',
+             'BERRIEN COUNTY',
+             'OCEANA COUNTY',
+             'BARRY COUNTY',
+             'BRANCH COUNTY',
+             'CLINTON COUNTY',
+             'EATON COUNTY',
+             'IONIA COUNTY',
+             'LAPEER COUNTY',
+             'MONROE COUNTY',
+             'VAN BUREN COUNTY'))
+
+target_cnty_coverage <- mi_fcc_stats %>% summarise(TARGET_CNTY_LOCATIONS = sum(TARGET_LOCATION_IDS), .by = COUNTY_NAME)
+
+mi_fcc_stats <- left_join(mi_fcc_stats, target_cnty_coverage, by = "COUNTY_NAME")
+
+kml <- readr::read_file('FULL_NETWORK_123NET_R2.kml')
+kml_file <- sf::read_sf('FULL_NETWORK_123NET_R2.kml')
+
+options(tigris_use_cache = TRUE)
+census_api_key('d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9', install = TRUE, overwrite = TRUE)
+
+# mi_county <- get_acs(geography = "block", 
+#                      variables = "B23010_001",  #Households with children
+#                      state = c("MI"),
+#                      geometry = TRUE)
+
+# vars <- load_variables(2020, "pl")
+# View(vars)
+# vars20 <- c("P005003", "P005004", "P005006", "P004003")
+vars20 <- c("P1_001N")
+
+mi_county <- get_decennial(geography = "block", 
+                           variables = vars20, 
+                           year = 2020,
+                           summary_var = "P1_001N", 
+                           state = "MI", 
+                           geometry = TRUE) %>%
+                    select(NAME,GEOID,geometry)
+# P001001
+
+# mi_county_df <- inner_join(mi_fcc_stats, mi_county, by = "GEOID") %>% distinct()
+mi_county_df <- inner_join(mi_fcc_stats, mi_county, by = "GEOID") %>% distinct()
+
+# %>% 
+#   mutate(PCT_BEAD_ELIGIBLE = UNSERVED_WIRED_LOCATIONS/TOT_HOUSING_UNITS_ACS_16_20,
+#          TARGET_ONNET = if_else(TARGET_ON_NET==1,"YES","NO"),
+#          TARGET_EXPANSION_MARKETS = if_else(TARGET_EXPANSION_MARKETS==1,"YES","NO"),
+#          ALL_TARGET_MARKETS = if_else(ALL_TARGET_MARKETS==1,"YES","NO"),
+#          BEAD_PER_ROAD_MILE = sum(ifelse(UNSERVED_WIRED_LOCATIONS==0, 0, UNSERVED_WIRED_LOCATIONS))/sum(ROAD_MILES))
+
+mi_county_sf <- sf::st_as_sf(mi_county_df)
+
+# sd <- SharedData$new(fl_county_sf)
+
+# kml_file <- '/cloud/project/summit.kml'
+# kml_file <- sf::read_sf(kml_file)
+
+st_crs(mi_county_sf) <- st_crs(kml_file)  # Set the CRS of stores_sf to match WGS 84 (EPSG: 4326)
+
+# https://gis.stackexchange.com/questions/349955/getting-a-new-column-with-distance-to-the-nearest-feature-in-r
+nearest <- st_nearest_feature(mi_county_sf,kml_file)
+dist <- st_distance(mi_county_sf,kml_file[nearest,], by_element=TRUE)
+pljoin <- cbind(mi_county_sf, st_drop_geometry(kml_file)[nearest,])
+pljoin$dist <- dist/1609 # convert meters to milles
+pljoin$dist <- gsub("\\[m\\]", "", pljoin$dist)
+pljoin$dist <- as.numeric(pljoin$dist)
+processed_df <- pljoin %>%
+  mutate(dist_bin = ifelse(dist==0,"On-net",
+                    ifelse(dist>0 & dist<=5,"Near-net (1 to 5 Miles)",
+                    ifelse(dist>5 & dist<=10,"Off-net (6 to 10 Miles)",       
+                            "Far Off-net (>10 Miles)"))),
+         GEOID = as.factor(GEOID))
+
+processed_df$dist_bin <- factor(processed_df$dist_bin)
+
+# Define the desired order of levels
+desired_order <- c("On-net", "Near-net (1 to 5 Miles)", "Off-net (6 to 10 Miles)")  # Modify this based on your actual bin labels
+# Reorder the levels of the factor
+processed_df$dist_bin <- factor(processed_df$dist_bin, levels = desired_order)
+
+
+sd <- SharedData$new(processed_df)
+```
+
+BEAD Map {data-icon="fas fa-map-marked-alt"}
+==================================================
+
+
+Column {.sidebar data-width=450}
+----------------------------------------------------
+
+
+```{r}
+# Create placeholder for the downloadButton
+uiOutput("downloadUI")
+```
+
+```{r}
+# Create the actual downloadButton
+output$downloadUI <- renderUI( {
+  # downloadButton("downBtn", "Download Data", style = "width:100%;")
+  downloadButton("downBtn", "Download Data", style = "width:100%")
+})
+
+# Add download handling
+output$downBtn <- downloadHandler(
+  filename = function() {
+    "mi_bead_analysis_data.csv"
+  },
+  content = function(file) {
+    write.csv(mi_fcc_stats, file, row.names = FALSE)
+  }
+)
+```
+
+### <font size="5">**Filters**</font> 
+
+```{r filter_1}
+
+  filter_select(
+  id = "county",
+  label = "Select Counties:",
+  sharedData = sd,
+  group = ~COUNTY_NAME,
+  allLevels = TRUE
+  )
+  
+  filter_checkbox(
+  id = "dist",
+  label = "123Net Network Proximity(miles):",
+  sharedData = sd,
+  group = ~dist_bin,
+  inline = FALSE,
+  columns = 1
+  )
+  
+  filter_slider("bead", "BEAD Locations Per Road Mile:", sd, "BEAD_PER_ROAD_MILE", round = TRUE)
+
+```
+
+<font size="3">**Data Sources and Definitions:**</font> 
+
+- FCC's Broadband Data Collection (Jun. 2023, latest vintage).
+
+- FCC's Unserved/Underserved Location Data (Oct. 2023).
+
+- Road miles calculated using U.S. Census Bureau's Tiger/Line database for Rural/Urban functional system lane-length.
+
+- BSL or Broadband Serviceable Location is defined as a residential address location that is served by 1 or more technologies as defined by the FCC.
+
+- Total BEAD Eligible Locations include locations which are Unserved and Underserved and not "covered" by any other subsidy program.
+
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Total Residential BSLs**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_1 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_1 <- round(sum(vbox_1$TOTAL_RESIDENTIAL_LOCATION_IDS),2)
+
+valueBox(value = format(value_1, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Total Served BSLs**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_2 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_2 <- round(sum(vbox_2$TOTAL_SERVED_LOCATIONS),2)
+
+valueBox(value = format(value_2, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Served BSLs %**</font>
+
+```{r}
+renderGauge({
+  
+  gauge_1 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+  
+  value <- sum(ifelse(gauge_1$TOTAL_SERVED_LOCATIONS==0, 0, gauge_1$TOTAL_SERVED_LOCATIONS))/sum(gauge_1$TOTAL_RESIDENTIAL_LOCATION_IDS)
+  
+  if(!is.infinite(value) && !is.nan(value) && !is.na(value)) { 
+  gauge(value*100, 
+              min = 0, 
+              max = 100, 
+              symbol = '%',
+              label = "Served BSLs %", 
+              gaugeSectors(
+                success = c(31, 100), 
+                warning = c(26, 30), 
+                danger = c(0, 25))
+        )
+  } else {
+    gauge(value=0, 
+              min = 0, 
+              max = 100, 
+              symbol = '%',
+              label = "Served BSLs %", 
+              gaugeSectors(
+                success = c(31, 100), 
+                warning = c(26, 30), 
+                danger = c(0, 25))
+        )
+  }
+        
+})
+```
+
+### <font size="3">**BEAD Eligible Locations**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_3 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_3 <- round(sum(vbox_3$UNSERVED_PLUS_UNDERSERVED),2)
+
+valueBox(value = format(value_3, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**BEAD Eligible Location %**</font>
+
+```{r}
+renderGauge({
+  
+  gauge_2 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+  
+  value <- sum(ifelse(gauge_2$UNSERVED_PLUS_UNDERSERVED==0, 0, gauge_2$UNSERVED_PLUS_UNDERSERVED))/sum(gauge_2$TOTAL_RESIDENTIAL_LOCATION_IDS)
+  
+  if(!is.infinite(value) && !is.nan(value) && !is.na(value)) { 
+  gauge(value*100, 
+              min = 0, 
+              max = 100, 
+              symbol = '%',
+              label = "BEAD Eligible %", 
+              gaugeSectors(
+                success = c(31, 100), 
+                warning = c(26, 30), 
+                danger = c(0, 25))
+        )
+  } else {
+    gauge(value=0, 
+              min = 0, 
+              max = 100, 
+              symbol = '%',
+              label = "BEAD Eligible %", 
+              gaugeSectors(
+                success = c(31, 100), 
+                warning = c(26, 30), 
+                danger = c(0, 25))
+        )
+  }
+        
+})
+```
+
+
+### <font size="3">**BEAD Locations per Road Mile**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_5 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_5 <- round(sum(ifelse(vbox_5$UNSERVED_PLUS_UNDERSERVED==0 | vbox_5$ROAD_MILES==0, 0, vbox_5$UNSERVED_PLUS_UNDERSERVED))/sum(vbox_5$ROAD_MILES),1)
+
+valueBox(value = format(value_5, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Occupancy Rate**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_6 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_6 <- round(sum(ifelse(vbox_6$TOT_OCCP_UNITS_ACS_16_20==0, 0, vbox_6$TOT_OCCP_UNITS_ACS_16_20))/sum(vbox_6$TOT_HOUSING_UNITS_ACS_16_20),1)
+
+valueBox(value = scales::percent(value_6, 0.1), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Density (HUs per Road Mile)**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_7 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_7 <- round(sum(ifelse(vbox_7$TOT_HOUSING_UNITS_ACS_16_20==0, 0, vbox_7$TOT_HOUSING_UNITS_ACS_16_20))/sum(vbox_7$ROAD_MILES),1)
+
+valueBox(value = format(value_7, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Average Household Income**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_12 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_12 <- round(sum(ifelse(vbox_12$AGGREGATE_HH_INC_ACS_16_20==0, 0, vbox_12$AGGREGATE_HH_INC_ACS_16_20))/sum(vbox_12$TOT_HOUSING_UNITS_ACS_16_20),0)
+
+valueBox(value = scales::dollar(value_12, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Cable Competitors**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_8 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_8 <- round(mean(vbox_8$NUM_CABLE_COMPETITORS),1)
+
+valueBox(value = format(value_8, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**FTTH Competitors**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_9 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_9 <- round(mean(vbox_9$NUM_FTTH_COMPETITORS),1)
+
+valueBox(value = format(value_9, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Copper Competitors**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_10 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_10 <- round(mean(vbox_10$NUM_COPPER_COMPETITORS),1)
+
+valueBox(value = format(value_10, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**FWA Competitors**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_11 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_11 <- round(mean(vbox_11$NUM_FWA_COMPETITORS),1)
+
+valueBox(value = format(value_11, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="5">**BEAD Eligible Housing Units By Census Block & Network Proximity**</font>
+
+```{r, include=TRUE}
+renderLeaflet({
+  
+  map_df <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+  # %>% mutate(TOTAL_BEAD_LOCATIONS = ifelse(is.na(TOTAL_BEAD_LOCATIONS), 0, TOTAL_BEAD_LOCATIONS))
+  
+  minVal <- min(map_df$BEAD_PER_ROAD_MILE, na.rm = TRUE)
+  maxVal <- max(map_df$BEAD_PER_ROAD_MILE, na.rm = TRUE)
+  domain <- c(minVal,maxVal)
+
+  # colorPal <- c(colorRampPalette(colors = c("#b2182b", "#b6f0b6"), space = "Lab")(abs(minVal)),
+  #               colorRampPalette(colors = c("#b6f0b6", "#008000"), space = "Lab")(maxVal))
+  
+  colorPal <- c(colorRampPalette(colors = c("#b2182b", "#FFBB33"), space = "Lab")(abs(minVal)+1),
+                colorRampPalette(colors = c("#FFBB33", "#008000"), space = "Lab")(maxVal))
+
+   labels <- paste0(
+    "<strong> County: </strong>",
+    map_df$NAME, "<br/>",
+    "<strong> Median Income: </strong>",
+    scales::dollar(map_df$MED_HHD_INC_ACS_16_20, big.mark = ",", accuracy = 0.1), "<br/>",
+    "<strong> HUs per Road Mile: </strong>",
+    scales::comma(map_df$HHD_PER_ROAD_MILE, accuracy = 0.1), "<br/>",
+    "<strong> BEAD Locations per Road Mile: </strong>",
+    scales::comma(map_df$BEAD_PER_ROAD_MILE, accuracy = 0.1), "<br/>",
+    "<strong> Cable Providers: </strong>",
+    map_df$TOP_CABLE_PROVIDERS, "<br/>",
+    "<strong> FTTH Providers: </strong>",
+    map_df$TOP_FIBER_PROVIDERS, "<br/>",
+    "<strong> Copper Providers: </strong>",
+    map_df$TOP_COPPER_PROVIDERS, "<br/>",
+    "<strong> FWA Providers: </strong>",
+    map_df$TOP_FWA_PROVIDERS, "<br/>"
+    ) %>%
+    lapply(htmltools::HTML)
+  
+  
+   leaflet() %>% 
+    # setView(-77.0369, 38.9072, 12) %>%
+    # addProviderTiles(providers$CartoDB.Positron) %>%
+    addProviderTiles(provider = "OpenStreetMap", options = providerTileOptions(opacity = 1)) %>%
+    addPolygons(
+      data = map_df, 
+      fillColor = ~ get('colorBin')(colorPal, domain)(BEAD_PER_ROAD_MILE), 
+      weight = 1.5, 
+      opacity = 1, 
+      color = "white",
+      fillOpacity = 0.5, 
+      popup = labels
+      ) %>%
+    # addWebGLKMLHeatmap(kml, size = 20, units = "px") %>%
+    addKML(
+      kml,
+      # markerType = "marker",
+      stroke = TRUE, fillColor = "black", fillOpacity = 0, weight = 3,
+      markerOptions = markerOptions(radius = 1)) %>%
+    addLegend(
+      position = "bottomright",
+      pal = colorNumeric(colorPal, domain = domain),
+      values = domain,
+      bins = 10,
+      title = "BEAD Locations per Road Mile",
+      # labFormat = labelFormat(prefix = "$"),
+      opacity = 1)
+   
+  })
+```
+
+Market Statistics {data-icon="fa-chart-bar"}
+==================================================
+
+```{r, include=FALSE}
+
+pop20 <- get_decennial(
+  state = "MI",
+  geography = "county",
+  variables = "P1_001N",
+  year = 2020
+)
+
+pop10 <- get_decennial(
+  state = "MI",
+  geography = "county",
+  variables = "P001001",
+  year = 2010
+)
+
+pop10_clean <- pop10 %>%
+  select(GEOID, value10 = value)
+
+pop20 <- pop20 %>%
+  select(GEOID, NAME, value20 = value)
+
+county_joined <- pop20 %>%
+  left_join(pop10_clean, by = "GEOID")
+
+county_change <- county_joined %>%
+  mutate(
+    total_change = value20 - value10,
+    percent_change = 100 * (total_change / value10)
+  ) %>%
+  filter(NAME %in% c(
+            'Arenac County, Michigan',
+             'Bay County, Michigan',
+             'Calhoun County, Michigan',
+             'Genesee County, Michigan',
+             'Gratiot County, Michigan',
+             'Ingham County, Michigan',
+             'Isabella County, Michigan',
+             'Jackson County, Michigan',
+             'Kalamazoo County, Michigan',
+             'Kent County, Michigan',
+             'Livingston County, Michigan',
+             'Macomb County, Michigan',
+             'Mason County, Michigan',
+             'Midland County, Michigan',
+             'Muskegon County, Michigan',
+             'Oakland County, Michigan',
+             'Ottawa County, Michigan',
+             'Saginaw County, Michigan',
+             'Shiawassee County, Michigan',
+             'St. Clair County, Michigan',
+             'Washtenaw County, Michigan',
+             'Wayne County, Michigan',
+             'Allegan County, Michigan',
+             'Berrien County, Michigan',
+             'Oceana County, Michigan',
+             'Barry County, Michigan',
+             'Branch County, Michigan',
+             'Clinton County, Michigan',
+             'Eaton County, Michigan',
+             'Ionia County, Michigan',
+             'Lapeer County, Michigan',
+             'Monroe County, Michigan',
+             'Van Buren County, Michigan')
+      )
+
+pop20_state <- get_decennial(
+  state = "MI",
+  geography = "state",
+  variables = "P1_001N",
+  year = 2020
+)
+
+pop10_state <- get_decennial(
+  state = "MI",
+  geography = "state",
+  variables = "P001001",
+  year = 2010
+)
+
+pop10_state_clean <- pop10_state %>%
+  select(GEOID, value10 = value)
+
+pop20_state <- pop20_state %>%
+  select(GEOID, NAME, value20 = value)
+
+state_joined <- pop20_state %>%
+  left_join(pop10_state_clean, by = "GEOID")
+
+state_change <- state_joined %>%
+  mutate(
+    total_change = value20 - value10,
+    percent_change = 100 * (total_change / value10)
+    )
+
+mi_vacancies <- get_decennial(
+  geography = "county",
+  variables = c(total_households = "H1_001N",
+                vacant_households = "H1_003N"),
+  state = "MI",
+  year = 2020,
+  output = "wide"
+) %>%
+  mutate(percent_vacant = 100 * (vacant_households / total_households))  %>%
+  filter(NAME %in% c(
+            'Arenac County, Michigan',
+             'Bay County, Michigan',
+             'Calhoun County, Michigan',
+             'Genesee County, Michigan',
+             'Gratiot County, Michigan',
+             'Ingham County, Michigan',
+             'Isabella County, Michigan',
+             'Jackson County, Michigan',
+             'Kalamazoo County, Michigan',
+             'Kent County, Michigan',
+             'Livingston County, Michigan',
+             'Macomb County, Michigan',
+             'Mason County, Michigan',
+             'Midland County, Michigan',
+             'Muskegon County, Michigan',
+             'Oakland County, Michigan',
+             'Ottawa County, Michigan',
+             'Saginaw County, Michigan',
+             'Shiawassee County, Michigan',
+             'St. Clair County, Michigan',
+             'Washtenaw County, Michigan',
+             'Wayne County, Michigan',
+             'Allegan County, Michigan',
+             'Berrien County, Michigan',
+             'Oceana County, Michigan',
+             'Barry County, Michigan',
+             'Branch County, Michigan',
+             'Clinton County, Michigan',
+             'Eaton County, Michigan',
+             'Ionia County, Michigan',
+             'Lapeer County, Michigan',
+             'Monroe County, Michigan',
+             'Van Buren County, Michigan')
+         )
+
+mi_state_vacancies <- get_decennial(
+  geography = "state",
+  variables = c(total_households = "H1_001N",
+                vacant_households = "H1_003N"),
+  state = "MI",
+  year = 2020,
+  output = "wide"
+) %>%
+  mutate(percent_vacant = 100 * (vacant_households / total_households)
+         )
+```
+
+### <font size="3">**Population Change By County**</font>
+
+```{r}
+renderPlot({
+
+  ggplot(county_change, aes(x = percent_change, y = reorder(NAME, percent_change))) +
+  geom_col(fill = "navy", color = "navy", alpha = 0.5) +
+  theme_minimal(base_family = "Verdana") +
+  scale_x_continuous(labels = label_percent(scale = 1)) +
+  labs(x = "Population Change Percent",
+       y = "",
+       title = "Population Change Percent In 123NET Target Expansion Counties",
+       subtitle = "2020/2010 decennial US Census") +
+  geom_vline(xintercept = 1.96) +
+  annotate("text", x=1.6, y=10, label="+2% Michigan", angle=90, size = 5) +
+  theme(text = element_text(size=18))
+})
+```
+
+### <font size="3">**Household Vacancy Rate By County**</font>
+
+```{r}
+renderPlot({
+
+  ggplot(mi_vacancies, aes(x = percent_vacant, y = reorder(NAME, percent_vacant))) +
+  geom_col(fill = "navy", color = "navy", alpha = 0.5) +
+  theme_minimal(base_family = "Verdana") +
+  scale_x_continuous(labels = label_percent(scale = 1)) +
+  labs(x = "Vacancy Rate Percent",
+       y = "",
+       title = "Vacancy Percent In 123NET Target Expansion Counties",
+       subtitle = "2020 decennial US Census") +
+  geom_vline(xintercept = 11.6) +
+  annotate("text", x=11, y=10, label="11.6% Michigan", angle=90, size = 5) +
+  theme(text = element_text(size=18))
+})
+```
+
