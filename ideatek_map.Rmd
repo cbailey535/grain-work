@@ -1,0 +1,616 @@
+---
+title: "Ideatek Coverage Map"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: 
+      version: 4
+      bootswatch: minty
+    orientation: rows
+    vertical_layout: fill
+    logo: https://graingp.com/wp-content/uploads/2021/05/logo.svg
+runtime: shiny
+resource_files:
+  - ideatek_cb_stats.csv
+
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(flexdashboard)
+#library(crosstalk)
+library(shiny)
+library(shinythemes)
+library(htmlwidgets)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+library(tidycensus)
+library(memoise)
+```
+
+
+```{r, include=FALSE}
+ideatek_src <- read_csv("ideatek_cb_stats.csv") %>%
+  janitor::clean_names() %>%
+  mutate(GEOID = as.character(census_block),
+         market_expansion = as.factor(market_expansion),
+         land_area = ifelse(land_area == 0, NA, land_area / 2.59)
+    )
+
+# Load the cached census data from the local .rds file
+geo_blocks <- readRDS("census_data.rds") %>%
+  mutate(GEOID = as.character(GEOID))  # Ensure GEOID is character type
+
+ideatek_joined <- inner_join(ideatek_src,geo_blocks, by = "GEOID")
+
+ideatek_df_sf <- sf::st_as_sf(ideatek_joined)
+
+ideatek_df_sft <- st_transform(ideatek_df_sf, crs = 4326)
+
+# Read the KML file once and simplify it for performance
+kml_file <- sf::read_sf('ideatek_fiber_network.kml') 
+
+# Simplify the geometry for performance
+kml_file <- st_simplify(kml_file, dTolerance = 0.01)
+
+# Ensure CRS is consistent between your data and KML file
+st_crs(kml_file) <- 4326  # Assign CRS to match the leaflet map's projection
+
+kml <- readr::read_file('ideatek_fiber_network.kml')
+
+# Define the single latitude/longitude point as an sf object
+# Replace `longitude` and `latitude` with your actual values
+single_point <- st_sfc(st_point(c(-97.775949, 38.1419774)), crs = 4326)
+
+# Ensure the KML file is in the same CRS as the point (transform if needed)
+kml_file <- st_transform(kml_file, crs = st_crs(single_point))
+
+# Memoized distance calculation for performance (updated for all distances)
+memoized_distance_all <- memoise(function(point, features) {
+  # Calculate distances from the single point to every polyline in features
+  dist <- st_distance(point, features)
+  list(dist = dist)
+})
+
+# Calculate the distance from the single point to every feature in ideatek_df_sft
+distance_data <- memoized_distance_all(single_point, ideatek_df_sft)
+dist <- distance_data$dist / 1609.34  # Convert meters to miles
+
+# Convert the distances to numeric values (removes the units)
+dist_numeric <- as.numeric(dist)
+
+# Prepare the result (join distances to the original data)
+ideatek_df_sft$dist <- dist_numeric
+
+# Optionally, you can bin the distances just like in your original code
+ideatek_df_sft <- ideatek_df_sft %>%
+  mutate(
+    dist_bin = case_when(
+      dist < 41.13 ~ "Less than 41 Miles",
+      dist >= 41.13 & dist < 84.44 ~ "41 to 85 Miles",
+      dist >= 84.44 & dist < 127.62 ~ "85 to 128 Miles",
+      dist >= 127.62 & dist < 193.74 ~ "128 to 194 Miles",
+      TRUE ~ "Greater than 194 Miles"
+    )
+  )
+
+# Drop the geometry and convert to a data.frame
+ideatek_df_no_geom <- st_drop_geometry(ideatek_df_sft)
+
+# Create a directory to write the geojson file
+#dir.create("C:/Temp", recursive = TRUE, showWarnings = FALSE)
+# Write to geojson format
+#sf::st_write(buckbci_df_sf, "C:/Temp/buckbci_df_sf.geojson")
+# Write to Shapefile format option (Note: column names cannot exceed 10 charaacters)
+#sf::st_write(buckbci_df_sf, "C:\\Temp\\buckbci_df_sf.shp")
+```
+
+Coverage Map {data-icon="fas fa-map-marked-alt"}
+==================================================
+
+
+Column {.sidebar data-width=325}
+----------------------------------------------------
+
+
+```{r}
+# Create placeholder for the downloadButton
+uiOutput("downloadUI")
+
+# Create the actual downloadButton
+output$downloadUI <- renderUI({
+  downloadButton("downBtn", "Download Data", style = "width:100%")
+})
+
+# Add download handling
+output$downBtn <- downloadHandler(
+  filename = function() {
+    "ideatek_cb_data.csv"
+  },
+  content = function(file) {
+    write.csv(ideatek_df_no_geom, file, row.names = FALSE)
+  }
+)
+```
+
+```{r}
+filtered_data <- reactive({
+  ideatek_df_sft %>%
+    filter(
+      (is.null(input$state_name) | state_name %in% input$state_name),
+      (is.null(input$county_name) | county_name %in% input$county_name),
+      (is.null(input$usps_zip_pref_city) | usps_zip_pref_city %in% input$usps_zip_pref_city),
+      (is.null(input$market_expansion) | market_expansion %in% input$market_expansion)
+    )
+})
+
+# Reactive expression to filter data by selected state
+filtered_data_by_state <- reactive({
+  req(input$state_name)  # Only process if state_name is selected
+  ideatek_df_sft %>%
+    filter(state_name %in% input$state_name)
+})
+
+# Reactive expression to filter data by selected state and county
+filtered_data_by_county <- reactive({
+  req(input$state_name, input$county_name)  # Only process if both state_name and county_name are selected
+  filtered_data_by_state() %>%
+    filter(county_name %in% input$county_name)
+})
+
+# Reactive expression to filter data by state, county, and city
+filtered_data_by_city <- reactive({
+  req(input$state_name, input$county_name, input$usps_zip_pref_city)  # Process if all three are selected
+  filtered_data_by_county() %>%
+    filter(usps_zip_pref_city %in% input$usps_zip_pref_city)
+})
+
+filtered_data_by_expansion <- reactive({
+  req(input$state_name, input$county_name, input$usps_zip_pref_city, input$market_expansion)  # Process if all three are selected
+  filtered_data_by_city() %>%
+    filter(market_expansion %in% input$market_expansion)
+})
+```
+
+### <font size="5">**Filters**</font> 
+
+```{r}
+# UI inputs
+selectizeInput("state_name",
+               "Step 1: Select State Name(s):",
+               choices = NULL,  # Choices will be dynamically updated
+               selected = NULL,
+               multiple = TRUE,
+               options = list(placeholder = 'Select State(s)',
+                              maxOptions = 3))
+
+selectizeInput("county_name",
+               "Step 2: Select County Name(s):",
+               choices = NULL,  # Choices will be dynamically updated
+               selected = NULL,
+               multiple = TRUE,
+               options = list(placeholder = 'Select county name(s)',
+                              maxOptions = 1000))
+
+selectizeInput("usps_zip_pref_city",
+               "Step 3: Select City Name(s):",
+               choices = NULL,  # Choices will be dynamically updated
+               selected = NULL,
+               multiple = TRUE,
+               options = list(placeholder = 'Select city name(s)',
+                              maxOptions = 1000))
+
+selectizeInput("market_expansion",
+              "Step 4: Select Market Expansion:",
+              choices = NULL,  # Choices will be dynamically updated
+              selected = NULL,
+              multiple = TRUE,
+              options = list(placeholder = 'Market Expansion-Yes/No',
+                             maxOptions = 3))
+#
+# Add reset button
+actionButton("reset_filters", "Reset Filters", class = "btn btn-danger")
+
+# Observer to update state_name choices
+# Observer to update state_name choices
+observe({
+  updateSelectizeInput(session, "state_name",
+                       choices = sort(unique(ideatek_df_sft$state_name)),
+                       selected = NULL,
+                       server = TRUE)
+})
+
+# Observer to update county_name choices based on selected state_name
+observe({
+  req(input$state_name)
+  
+  county_names <- unique(filtered_data_by_state() %>% pull(county_name))
+  
+  updateSelectizeInput(session, "county_name",
+                       choices = sort(county_names),
+                       selected = NULL,
+                       server = TRUE)
+})
+
+# Observer to update usps_zip_pref_city choices based on selected county_name
+observe({
+  req(input$county_name)
+  
+  city_names <- unique(filtered_data_by_county() %>% pull(usps_zip_pref_city))
+  
+  updateSelectizeInput(session, "usps_zip_pref_city",
+                       choices = sort(city_names),
+                       selected = NULL,
+                       server = TRUE)
+})
+
+#Observer to update top_fiber_providers choices based on selected usps_zip_pref_city
+observe({
+ req(input$usps_zip_pref_city)
+
+ market_expansion <- unique(filtered_data_by_city() %>% pull(market_expansion))
+
+ updateSelectizeInput(session, "market_expansion",
+                      choices = sort(market_expansion),
+                      selected = NULL,
+                      server = TRUE)
+})
+
+# Reset filter selections on clicking reset button
+observeEvent(input$reset_filters, {
+  updateSelectizeInput(session, "state_name", selected = NULL, server = TRUE)
+  updateSelectizeInput(session, "county_name", selected = NULL, server = TRUE)
+  updateSelectizeInput(session, "usps_zip_pref_city", selected = NULL, server = TRUE)
+  updateSelectizeInput(session, "market_expansion", selected = NULL, server = TRUE)
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Census Housing Units (2020)**</font>
+
+```{r}
+renderValueBox({
+  
+  housing <- round(sum(filtered_data()$tot_housing_units_cen_2020, na.rm = TRUE))
+
+  valueBox(value = format(housing, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Population (2020)**</font>
+
+```{r}
+renderValueBox({
+  
+  population <- round(sum(filtered_data()$tot_population_cen_2020, na.rm = TRUE))
+
+  valueBox(value = format(population, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Land Area (sqmi)**</font>
+
+```{r}
+renderValueBox({
+  
+  land_area <- sum(filtered_data()$land_area, na.rm = TRUE)
+  
+  formatted_landarea <- scales::comma(land_area, accuracy = 1)
+
+  valueBox(value = format(land_area, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Population Density (sqmi)**</font>
+
+```{r}
+renderValueBox({
+  
+  land_area <- sum(filtered_data()$land_area, na.rm = TRUE)
+  population <- sum(filtered_data()$tot_population_cen_2020, na.rm = TRUE)
+  pop_density <- ifelse(land_area == 0, NA, population / land_area)
+  
+  # Format with 1 decimal place
+  formatted_popdensity <- sprintf("%.1f", pop_density)
+  
+  # Use formatted_popdensity in valueBox
+  valueBox(value = formatted_popdensity, 
+           icon = "fa-solid fa-house-chimney",  
+           color = "primary")
+
+})
+```
+
+### <font size="3">**Median HHI**</font>
+
+```{r}
+renderValueBox({
+  
+  avg_hhi <- median(filtered_data()$med_hhd_inc_acs_16_20, na.rm = TRUE)
+
+  # Format the coverage as a percentage using `scales::percent()`
+  formatted_hhi <- scales::dollar(avg_hhi, accuracy = 1)
+
+  valueBox(
+    value = formatted_hhi,  # Use the formatted percentage
+    #caption = "Test",
+    icon = "fa-solid fa-house-chimney",
+    color = "primary"
+  )
+
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Total Residential BSLs (FCC)**</font>
+
+```{r}
+renderValueBox({
+  
+  total_bsl <- round(sum(filtered_data()$total_residential_location_ids, na.rm = TRUE))
+
+  valueBox(value = format(total_bsl, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Ideatek Residential BSLs**</font>
+
+```{r}
+renderValueBox({
+  
+  ideatek_bsl <- round(sum(filtered_data()$target_residential_location_ids, na.rm = TRUE))
+
+  valueBox(value = format(ideatek_bsl, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+### <font size="3">**Ideatek's Coverage %**</font>
+
+```{r}
+renderValueBox({
+  
+  total_bsl <- round(sum(filtered_data()$total_residential_location_ids, na.rm = TRUE))
+  ideatek_bsl <- round(sum(filtered_data()$target_residential_location_ids, na.rm = TRUE))
+  coverage <- ifelse(total_bsl == 0, NA, ideatek_bsl / total_bsl)
+
+  # Format the coverage as a percentage using `scales::percent()`
+  formatted_coverage <- scales::percent(coverage, accuracy = 0.1)
+
+  valueBox(
+    value = formatted_coverage,  # Use the formatted percentage
+    icon = "fa-solid fa-house-chimney",
+    color = "primary"
+  )
+
+})
+```
+
+### <font size="3">**HUs/Lane Mile Density**</font>
+
+```{r}
+renderGauge({
+
+  # Your data calculations
+  total_lane_miles <- round(sum(filtered_data()$road_miles, na.rm = TRUE))
+  housing <- round(sum(filtered_data()$tot_housing_units_cen_2020, na.rm = TRUE))
+  hu_lane_mile <- ifelse(total_lane_miles == 0, 0, housing / total_lane_miles)
+
+  # Create the gauge with value and target line
+ if(is.finite(hu_lane_mile) && hu_lane_mile != 0) {
+  gauge(
+    value = hu_lane_mile,
+    min = 0,
+    max = 200,
+    gaugeSectors(
+      success = c(11, 200), warning = c(6, 10), danger = c(0, 5))
+  )
+} else {
+  "No valid data available for the gauge."
+}
+})
+```
+
+### <font size="3">**HUs No Broadband**</font>
+
+```{r}
+renderGauge({
+
+ # Your data calculations
+  hhd_no_internet <- round(sum(filtered_data()$hhd_no_internet_acs_16_20, na.rm = TRUE))
+  housing <- round(sum(filtered_data()$tot_housing_units_cen_2020, na.rm = TRUE))
+  hu_no_internet <- ifelse(housing == 0, 0, (hhd_no_internet / housing) * 100)  # Calculate as percentage directly
+  
+  # Create the gauge only if the value is finite and non-zero
+  if (is.finite(hu_no_internet) && hu_no_internet != 0) {
+    gauge(
+      value = hu_no_internet,         # Use numeric percentage here
+      min = 0,
+      max = 100,
+      symbol = "%",
+      gaugeSectors(
+        success = c(0, 10), warning = c(11, 20), danger = c(21, 100)
+      )
+    )
+  } else {
+    "No valid data available for the gauge."
+  }
+})
+```
+
+### <font size="3">**% Unserved/Underserved**</font>
+
+```{r}
+renderGauge({
+
+ # Your data calculations
+  total_unserved <- round(sum(filtered_data()$total_unserved, na.rm = TRUE))
+  total_bsl <- round(sum(filtered_data()$total_residential_location_ids, na.rm = TRUE))
+  unserved_pct <- ifelse(total_bsl == 0, 0, (total_unserved / total_bsl) * 100)  # Calculate as percentage directly
+  
+  # Create the gauge only if the value is finite and non-zero
+  if (is.finite(unserved_pct) && unserved_pct != 0) {
+    gauge(
+      value = unserved_pct,         # Use numeric percentage here
+      min = 0,
+      max = 100,
+      symbol = "%",
+      gaugeSectors(
+        success = c(0, 10), warning = c(11, 20), danger = c(21, 100)
+      )
+    )
+  } else {
+    "No valid data available for the gauge."
+  }
+})
+```
+
+### <font size="3">**Avg. Travel Distance From Buhler, KS (miles)**</font>
+
+```{r}
+renderValueBox({
+  
+  avg_dist <- mean(filtered_data()$dist, na.rm = TRUE)
+  
+  formatted_avg_dist = scales::comma(avg_dist, accuracy = 0.1)
+
+  valueBox(value = format(formatted_avg_dist, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+<!-- ### <font size="3">**Average Distance to Network (miles)**</font> -->
+
+<!-- ```{r} -->
+<!-- renderValueBox({ -->
+
+<!--   value_2 <- round(mean(filtered_data()$dist),1) -->
+
+<!--   valueBox(value = format(value_2, nsmall = 0, big.mark = ","), icon = "fa-solid fa-network-wired",  color = "primary") -->
+
+<!-- }) -->
+<!-- ``` -->
+
+<!-- Row {data-height=125} -->
+<!-- ----------------------------------------------------------------- -->
+
+<!-- ### <font size="5">**Properties By Housing Units**</font> -->
+
+<!-- ```{r} -->
+<!-- renderPlot({ -->
+
+<!-- distinct_count_df <- filtered_data() %>% -->
+<!--   mutate(housing_unit_bin = factor(housing_unit_bin, levels = c("0 HUs", "1 to 50 HUs", "50 to 88 HUs","89 to 136 HUs", "137 to 235 HUs", "236+ HUs"))) %>% -->
+<!--   group_by(housing_unit_bin) %>% -->
+<!--   summarise(property_address = length(unique(token)), .groups = 'drop') -->
+
+<!-- # Step 2: Create the bar chart with a line connecting the counts -->
+<!-- ggplot(distinct_count_df, aes(x = housing_unit_bin, y = property_address, group = 1)) + -->
+<!--   geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +  # Bar chart -->
+<!--   #geom_line(aes(x = as.numeric(median_age)), color = "red", size = 1) +  # Line connecting counts -->
+<!--   #geom_point(aes(x = as.numeric(median_age)), color = "red", size = 2) +  # Points on the line -->
+<!--   labs(title = "Distinct Count of Property Names by Housing units", -->
+<!--        x = "Housing Units", -->
+<!--        y = "Distinct Property Count") + -->
+<!--   theme_minimal() + -->
+<!--   scale_x_discrete(drop = FALSE) + # Ensure factor labels on x-axis -->
+<!--     scale_y_continuous( -->
+<!--     breaks = seq(0, max(distinct_count_df$property_address, na.rm = TRUE), by = 50), -->
+<!--     limits = c(0, max(distinct_count_df$property_address, na.rm = TRUE) + 50)  # Adding 50 for extra room -->
+<!--     ) + -->
+<!--   theme( -->
+<!--     axis.title.x = element_text(size = 14),  # Increase x-axis label font size -->
+<!--     axis.title.y = element_text(size = 14),  # Increase y-axis label font size -->
+<!--     axis.text.x = element_text(size = 12),   # Increase x-axis values font size -->
+<!--     axis.text.y = element_text(size = 12)    # Increase y-axis values font size -->
+<!--   ) -->
+<!-- }) -->
+<!-- ``` -->
+
+Row
+-----------------------------------------------------------------
+
+### <font size="5">**Provider Broadband Coverage by Census Block**</font>
+
+```{r}
+renderLeaflet({
+
+  map_df <- filtered_data()  
+  
+  # Define the color palette with colorFactor for categorical data
+  colorPal <- colorFactor(palette = c("green", "red"), domain = c("YES", "NO"))
+  
+  # Define the domain for the color palette
+  #minVal <- min(map_df$target_coverage_pct, na.rm = TRUE)
+  #maxVal <- max(map_df$target_coverage_pct, na.rm = TRUE)
+  #domain <- c(minVal, maxVal)
+
+# Define the color palette with colorNumeric
+  #colorPal <- colorNumeric(palette = c("#b2182b", "#FFBB33", "#008000"), domain = domain)
+
+  labels <- paste0(
+     "<strong> State: </strong>", map_df$state_name, "<br/>",
+     "<strong> County: </strong>", map_df$county_name, "<br/>",
+     "<strong> City: </strong>", map_df$usps_zip_pref_city, "<br/>",
+     "<strong> Total BSLs: </strong>", scales::comma(map_df$total_residential_location_ids, accuracy = 1), "<br/>",
+     "<strong> Ideatek BSLs: </strong>", scales::comma(map_df$target_residential_location_ids, accuracy = 1), "<br/>",
+     "<strong> Ideatek BSL Coverage: </strong>", scales::percent(map_df$target_coverage_pct, accuracy = 0.1), "<br/>",
+     "<strong> Top Copper Providers: </strong>", map_df$top_copper_providers, "<br/>",
+     "<strong> Top Cable Providers: </strong>", map_df$top_cable_providers, "<br/>",
+     "<strong> Top FTTH Providers: </strong>", map_df$top_fiber_providers, "<br/>",
+     "<strong> Top FWA Providers: </strong>", map_df$top_fwa_providers, "<br/>",
+     "<strong> Competitive Intensity: </strong>", map_df$ftth_competition, "<br/>",
+     "<strong> Census Block: </strong>", map_df$census_block, "<br/>",
+     "<strong> Expansion Market: </strong>", map_df$market_expansion, "<br/>",
+     "<strong> Distance from Buhler, KS: </strong>", map_df$dist_bin, "<br/>"
+     ) %>%
+     lapply(htmltools::HTML)
+  
+  leaflet() %>% 
+    addProviderTiles(provider = "OpenStreetMap", options = providerTileOptions(opacity = 1)) %>%
+    addPolygons(
+      data = map_df, 
+      fillColor = ~ colorPal(market_expansion), 
+      #fillColor = ~ colorPal(target_coverage_pct), 
+      weight = 0.1, 
+      opacity = 1, 
+      color = "NA",
+      fillOpacity = 0.5, 
+      label = labels,
+      labelOptions = labelOptions(
+        style = list("font-weight" = "normal", padding = "3px 8px"),
+        textsize = "13px",
+        direction = "auto"
+      )
+    ) %>%
+    addKML(
+      kml,
+      stroke = TRUE, fillColor = "black", fillOpacity = 0, weight = 2,
+      markerOptions = markerOptions(radius = 1)
+    ) %>%
+    addLegend(
+      position = "bottomright",
+      pal = colorPal,
+      values = map_df$market_expansion,
+      #values = domain,
+      #bins = 10,
+      title = "Market Expansion",
+      labFormat = labelFormat(
+        transform = function(x) ifelse(x == "YES", "YES", "NO")), # Optional: custom label format
+      #labFormat = function(type, value) {
+       # Format legend values as percentages -->
+      # paste0(scales::percent(value, accuracy = 1))
+     #},
+      opacity = 1
+    )
+
+  })
+```
+
