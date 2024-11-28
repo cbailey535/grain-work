@@ -1,0 +1,665 @@
+---
+title: "Summit Broadband HOA/COA Analysis"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: 
+      version: 4
+      bootswatch: minty
+    orientation: rows
+    vertical_layout: fill
+    logo: https://graingp.com/wp-content/uploads/2021/05/logo.svg
+runtime: shiny
+resource_files:
+  - hoa_master_list.csv
+  - summit_network_jul24.kml
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(flexdashboard)
+#library(crosstalk)
+library(shiny)
+library(shinythemes)
+library(htmlwidgets)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+library(tidycensus)
+library(memoise)
+```
+
+
+```{r, include=FALSE}
+census_api_key('d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9', install = TRUE, overwrite = TRUE)
+
+# Pull ACS data for median home values by Census Tract in California (2021)
+home_values <- get_acs(
+  geography = "tract",
+  variables = "B25077_001",  # Median home value variable
+  state = "FL",              # Replace with your state
+  year = 2021,               # ACS 5-year estimates
+  survey = "acs5",           # Use ACS 5-year survey
+  output = "wide"            # Output in wide format
+)
+
+fl_hoa_stats <- read.csv('hoa_master_list.csv') %>%
+  filter(latitude !=0, property_state=="FL") %>%
+  mutate(token = tolower(gsub("\\s+", "", paste0(src,property_name, property_address)))) %>%
+  mutate(housing_unit_bin = 
+    ifelse(total_units==0,"0 HUs",
+    ifelse(total_units>0 & total_units<50,"1 to 50 HUs",
+    ifelse(total_units>=50 & total_units<=88,"50 to 88 HUs",
+    ifelse(total_units>=89 & total_units<=136,"89 to 136 HUs",
+    ifelse(total_units>=137 & total_units<=235,"137 to 235 HUs","236+ HUs"))))),
+    housing_unit_bin = as.factor(housing_unit_bin),
+    median_age = suppressWarnings(as.numeric(median_age)),
+    median_hhi = suppressWarnings(as.numeric(median_hhi)),
+    tract = as.character(tract)
+    ) %>%
+  mutate(across(where(is.numeric), ~ replace(., is.na(.), 0)))
+
+desired_order <- c("0 HUs","1 to 50 HUs","50 to 88 HUs", "89 to 136 HUs", "137 to 235 HUs", "236+ HUs")  # Modify this based on your actual bin labels
+
+# Reorder the levels of the factor
+fl_hoa_stats$housing_unit_bin <- factor(fl_hoa_stats$housing_unit_bin, levels = desired_order)
+
+# View filtered data
+home_values_filtered <- home_values %>% filter(!is.na(B25077_001E)) %>% select(-B25077_001M)
+home_values_joined <- left_join(fl_hoa_stats,home_values_filtered, by = c("tract" = "GEOID")) 
+fl_hoa_stats_df <- home_values_joined %>% rename(house_value = B25077_001E)
+
+fl_hoa_stats_sf <- st_as_sf(fl_hoa_stats_df, coords = c("longitude", "latitude"), crs = 4326)
+
+# summit_cnty_coverage <- fl_fcc_stats %>% summarise(SUMMIT_CNTY_LOCATIONS = sum(HOUSING_UNITS), .by = COUNTY)
+
+# fl_fcc_stats <- left_join(fl_fcc_stats, summit_cnty_coverage, by = "COUNTY")
+
+# Read the KML file once and simplify it for performance
+kml_file <- sf::read_sf('summit_network_jul24.kml') 
+
+# Simplify the geometry for performance
+kml_file <- st_simplify(kml_file, dTolerance = 0.01)
+
+# Ensure CRS is consistent between your data and KML file
+st_crs(kml_file) <- 4326  # Assign CRS to match the leaflet map's projection
+
+kml <- readr::read_file('summit_network_jul24.kml')
+
+#kml_file <- sf::read_sf('summit_network_jul24.kml')
+
+# census_api_key('d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9', install = TRUE, overwrite = TRUE)
+# 
+# fl_county <- get_acs(geography = "tract", 
+#                      variables = "B23010_001",  #Households with children
+#                      state = c("FL"),
+#                      geometry = TRUE) 
+
+# fl_county_df <- inner_join(fl_fcc_stats, fl_county, by = "GEOID") %>% 
+#   mutate(BEAD_COVERAGE = TOTAL_BEAD_LOCATIONS/TOTAL_LOCATIONS,
+#          SUMMIT_FOOTPRINT = if_else(SUMMIT_CNTY_LOCATIONS>15,"YES","NO"))
+
+# fl_county_sf <- sf::st_as_sf(fl_county_df)
+
+# sd <- SharedData$new(fl_county_sf)
+
+# kml_file <- '/cloud/project/summit.kml'
+# kml_file <- sf::read_sf(kml_file)
+
+st_crs(fl_hoa_stats_sf) <- st_crs(kml_file)  # Set the CRS of stores_sf to match WGS 84 (EPSG: 4326)
+
+# https://gis.stackexchange.com/questions/349955/getting-a-new-column-with-distance-to-the-nearest-feature-in-r
+
+# Memoized distance calculation for performance
+memoized_distance <- memoise(function(df1, df2) {
+  nearest <- st_nearest_feature(df1, df2)
+  dist <- st_distance(df1, df2[nearest,], by_element = TRUE)
+  list(nearest = nearest, dist = dist)
+})
+
+distance_data <- memoized_distance(fl_hoa_stats_sf, kml_file)
+nearest <- distance_data$nearest
+dist <- distance_data$dist/1609.34  # Convert meters to miles
+
+# Prepare the joined data with the KML file
+pljoin <- cbind(fl_hoa_stats_sf, st_drop_geometry(kml_file)[nearest,])
+pljoin$dist <- as.numeric(dist)
+
+# Create the processed data frame
+processed_df <- pljoin %>%
+  mutate(
+    dist_bin = case_when(
+      dist < 1 ~ "On-net (<1 Mile)",
+      dist >= 1 & dist < 2 ~ "Near-net (1 to 2 Miles)",
+      dist >= 2 & dist < 5 ~ "Off-net (2 to 5 Miles)",
+      TRUE ~ "Far Off-net (5+ Miles)"
+    ),
+    association = as.factor(property_name)
+  )
+
+# Define the desired order for distance bins
+desired_order_dist <- c("On-net (<1 Mile)", "Near-net (1 to 2 Miles)", "Off-net (2 to 5 Miles)", "Far Off-net (5+ Miles)")
+processed_df$dist_bin <- factor(processed_df$dist_bin, levels = desired_order_dist)
+
+# Convert to data frame and prepare SharedData
+processed_df_out <- st_drop_geometry(processed_df) %>%
+  mutate(network_proximity_miles = scales::comma(dist, accuracy = 0.01)) %>%
+  select(
+    src,
+    tract,
+    property_name,
+    property_address,
+    property_city,
+    property_state,
+    property_zip,
+    property_cnty,
+    property_type,
+    total_units,
+    housing_unit_bin,
+    board_title,
+    board_lname,
+    board_fname,
+    board_address,
+    board_city,
+    board_state,
+    board_zip,
+    hoa_fee,
+    hoa_fee_freq,
+    median_age,
+    median_hhi,
+    top_copper_prov,
+    top_fiber_prov,
+    top_fwa_prov,
+    top_cable_prov,
+    network_proximity_miles,
+    dist_bin,
+    house_value
+  ) 
+```
+
+Property Map {data-icon="fas fa-map-marked-alt"}
+==================================================
+
+
+Column {.sidebar data-width=325}
+----------------------------------------------------
+
+
+```{r}
+# Create placeholder for the downloadButton
+uiOutput("downloadUI")
+```
+
+```{r}
+
+filtered_data <- reactive({
+  processed_df %>%
+    filter(
+      # Check if 'source' input is NULL, if so, include all 'src' values
+      if (!is.null(input$source)) src %in% input$source else TRUE,
+      
+      # Same for 'property_name'
+      if (!is.null(input$association)) property_name %in% input$association else TRUE,
+      
+      # Same for 'property_type'
+      if (!is.null(input$property_type)) property_type %in% input$property_type else TRUE,
+      
+      # Same for 'housing_unit_bin'
+      if (!is.null(input$housing)) housing_unit_bin %in% input$housing else TRUE,
+      
+      # Same for 'dist_bin'
+      if (!is.null(input$dist_bin)) dist_bin %in% input$dist_bin else TRUE
+    )
+  
+})
+
+# Create the actual downloadButton
+output$downloadUI <- renderUI({
+  downloadButton("downBtn", "Download Data", style = "width:100%")
+})
+
+# Add download handling
+output$downBtn <- downloadHandler(
+  filename = function() {
+    "processed_df_out.csv"
+  },
+  content = function(file) {
+    write.csv(processed_df_out, file, row.names = FALSE)
+  }
+)
+
+```
+### <font size="5">**Filters**</font> 
+
+```{r filter_1}
+selectizeInput("dist_bin", 
+               "Step 1: Select Network Proximity", 
+               choices = NULL,  # Choices will be dynamically updated
+               selected = NULL, 
+               multiple = TRUE, 
+               options = list(placeholder = 'Type to search for network proximity', 
+                              maxOptions = 5))
+
+selectizeInput("association", 
+               "Step 2: Select Property Name", 
+               choices = NULL,  # Choices will be dynamically updated
+               selected = NULL, 
+               multiple = TRUE, 
+               options = list(placeholder = 'Type to search for property names', 
+                              maxOptions = 3000))
+
+# STEP 1: Observe for dynamically updating 'dist_bin' without 'source'
+observe({
+  # No need to filter by 'source'
+  filtered_data <- processed_df %>%
+    select(dist_bin)  # Only select the column you need
+
+  # Update the 'dist_bin' choices
+  updateSelectizeInput(session, "dist_bin",
+                       choices = unique(filtered_data$dist_bin),
+                       selected = NULL,  # Reset selection when filter changes
+                       server = TRUE)
+})
+
+# STEP 2: Observe for dynamically updating 'association' based on selected 'dist_bin'
+observe({
+  req(input$dist_bin)  # Only 'dist_bin' needs to be selected
+  
+  # Filter data based on selected 'dist_bin'
+  filtered_data_association <- processed_df %>%
+    filter(dist_bin %in% input$dist_bin) %>%
+    select(property_name)  # Only select relevant column
+
+  # Update the 'association' choices
+  updateSelectizeInput(session, "association",
+                       choices = sort(unique(filtered_data_association$property_name)),
+                       selected = NULL,  # Reset selection when filters change
+                       server = TRUE)
+
+
+# 
+#  selectizeInput("source", 
+#                "Step 1: Select Data Source", 
+#                choices = NULL,  # Choices will be dynamically updated
+#                selected = NULL, 
+#                multiple = TRUE, 
+#                options = list(placeholder = 'Type to search for data source', 
+#                               maxOptions = 3))
+# 
+#   selectizeInput("dist_bin", 
+#                "Step 2: Select Network Proximity", 
+#                choices = NULL,  # Choices will be dynamically updated
+#                selected = NULL, 
+#                multiple = TRUE, 
+#                options = list(placeholder = 'Type to search for network proximity', 
+#                               maxOptions = 5))
+# 
+#   selectizeInput("association", 
+#                "Step 3: Select Property Name", 
+#                choices = NULL,  # Choices will be dynamically updated
+#                selected = NULL, 
+#                multiple = TRUE, 
+#                options = list(placeholder = 'Type to search for property names', 
+#                               maxOptions = 3000))
+#   
+# # STEP 1: Observe for dynamically updating 'source' filter
+# observe({
+#   updateSelectizeInput(session, "source",
+#                        choices = unique(processed_df$src),
+#                        server = TRUE)
+# })
+# 
+# # STEP 2: Observe for dynamically updating 'dist_bin' based on selected 'source'
+# observe({
+#   req(input$source)  # Ensure 'source' is selected
+#   
+#   # Filter data based on selected 'source', but only relevant columns to save memory
+#   filtered_data <- processed_df %>%
+#     filter(src %in% input$source) %>%
+#     select(dist_bin)  # Only select the column you need
+# 
+#   # Update the 'dist_bin' choices, with fallback to avoid memory overload
+#   updateSelectizeInput(session, "dist_bin",
+#                        choices = unique(filtered_data$dist_bin),
+#                        selected = NULL,  # Reset selection when filter changes
+#                        server = TRUE)
+# })
+# 
+# # STEP 3: Observe for dynamically updating 'association' based on selected 'source' and 'dist_bin'
+# observe({
+#   req(input$source, input$dist_bin)  # Ensure both 'source' and 'dist_bin' are selected
+#   
+#   # Filter data based on selected 'source' and 'dist_bin', selecting only the required columns
+#   filtered_data_association <- processed_df %>%
+#     filter(
+#       src %in% input$source,
+#       dist_bin %in% input$dist_bin
+#     ) %>%
+#     select(property_name)  # Only select relevant column
+# 
+#   # Update the 'association' choices
+#   updateSelectizeInput(session, "association",
+#                        choices = sort(unique(filtered_data_association$property_name)),
+#                        selected = NULL,  # Reset selection when filters change
+#                        server = TRUE)
+})
+
+```
+
+<font size="3">**Data Sources and Definitions:**</font> 
+
+- Network element data provided by Mark Rankin, Summit Broadband (SBB Connect2base.map 07.12.24.KMZ). 
+
+- Data sources include the HOA Board List, Sunshine List, and The Warren Group (TWG).
+
+- Board Member Position
+  - P = President
+  - V = Vice President
+  - T = Treasurer
+  - S = Secretary
+  - D = Director
+  - M = Managing Member
+  - O = Other
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Property Count**</font>
+
+```{r}
+renderValueBox({
+  
+  property_id <- length(unique(filtered_data()$token))
+
+  valueBox(value = format(property_id, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+
+### <font size="3">**Estimated Housing Units**</font>
+
+```{r}
+renderValueBox({
+  
+  value_1 <- round(sum(filtered_data()$total_units),0)
+
+  valueBox(value = format(value_1, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Average Housing Units per Property**</font>
+
+```{r}
+renderValueBox({
+  
+  # Filter out tokens with total_units = 0
+  filtered_data_non_zero <- filtered_data() %>%
+    filter(total_units > 0)
+  
+  # Compute the average total_units per distinct token
+  avg_total_units <- round(sum(filtered_data_non_zero$total_units) / n_distinct(filtered_data_non_zero$token), 0)
+
+  valueBox(value = format(avg_total_units, nsmall = 0, big.mark = ","), 
+           icon = "fa-solid fa-house-chimney",  
+           color = "primary")
+
+})
+```
+
+### <font size="3">**Average Distance to Network (miles)**</font>
+
+```{r}
+renderValueBox({
+  
+  value_2 <- round(mean(filtered_data()$dist),1)
+
+  valueBox(value = format(value_2, nsmall = 0, big.mark = ","), icon = "fa-solid fa-network-wired",  color = "primary")
+
+})
+```
+
+Row {data-height=125}
+-----------------------------------------------------------------
+
+### <font size="5">**Properties By Housing Units**</font>
+
+```{r}
+renderPlot({
+  
+distinct_count_df <- filtered_data() %>%
+  mutate(housing_unit_bin = factor(housing_unit_bin, levels = c("0 HUs", "1 to 50 HUs", "50 to 88 HUs","89 to 136 HUs", "137 to 235 HUs", "236+ HUs"))) %>%
+  group_by(housing_unit_bin) %>%
+  summarise(property_address = length(unique(token)), .groups = 'drop')
+
+# Step 2: Create the bar chart with a line connecting the counts
+ggplot(distinct_count_df, aes(x = housing_unit_bin, y = property_address, group = 1)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +  # Bar chart
+  #geom_line(aes(x = as.numeric(median_age)), color = "red", size = 1) +  # Line connecting counts
+  #geom_point(aes(x = as.numeric(median_age)), color = "red", size = 2) +  # Points on the line
+  labs(title = "Distinct Count of Property Names by Housing units",
+       x = "Housing Units",
+       y = "Distinct Property Count") +
+  theme_minimal() +
+  scale_x_discrete(drop = FALSE) + # Ensure factor labels on x-axis
+    scale_y_continuous(
+    breaks = seq(0, max(distinct_count_df$property_address, na.rm = TRUE), by = 50),
+    limits = c(0, max(distinct_count_df$property_address, na.rm = TRUE) + 50)  # Adding 50 for extra room
+    ) +
+  theme(
+    axis.title.x = element_text(size = 14),  # Increase x-axis label font size
+    axis.title.y = element_text(size = 14),  # Increase y-axis label font size
+    axis.text.x = element_text(size = 12),   # Increase x-axis values font size
+    axis.text.y = element_text(size = 12)    # Increase y-axis values font size
+  )
+})
+```
+
+<!-- ### <font size="5">**Properties By Network Proximity**</font> -->
+
+<!-- ```{r} -->
+<!-- renderPlot({ -->
+
+<!-- distinct_count_df <- filtered_data() %>% -->
+<!--   group_by(dist_bin) %>% -->
+<!--   summarise(distinct_property_count = n_distinct(property_name), .groups = 'drop') -->
+
+<!-- # Step 2: Create the bar chart with a line connecting the counts -->
+<!-- ggplot(distinct_count_df, aes(x = dist_bin, y = distinct_property_count, group = 1)) + -->
+<!--   geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +  # Bar chart -->
+<!--   #geom_line(aes(x = as.numeric(median_age)), color = "red", size = 1) +  # Line connecting counts -->
+<!--   #geom_point(aes(x = as.numeric(median_age)), color = "red", size = 2) +  # Points on the line -->
+<!--   labs(title = "Distinct Count of Property Names by Network Proximity", -->
+<!--        x = "Distance to Network (miles)", -->
+<!--        y = "Distinct Property Count") + -->
+<!--   theme_minimal() + -->
+<!--   scale_x_discrete(labels = levels(filtered_data()$dist_bin)) + # Ensure factor labels on x-axis -->
+<!--   scale_y_continuous(breaks = seq(0, max(distinct_count_df$distinct_property_count), by = 200)) +  # Show only integer values on y-axis -->
+<!--   theme( -->
+<!--     axis.title.x = element_text(size = 14),  # Increase x-axis label font size -->
+<!--     axis.title.y = element_text(size = 14),  # Increase y-axis label font size -->
+<!--     axis.text.x = element_text(size = 12),   # Increase x-axis values font size -->
+<!--     axis.text.y = element_text(size = 12)    # Increase y-axis values font size -->
+<!--   ) -->
+<!-- }) -->
+<!-- ``` -->
+
+### <font size="5">**Properties By Median Age**</font>
+
+```{r}
+renderPlot({
+  
+distinct_count_df <- filtered_data() %>%
+  filter(median_age>0) %>%
+  group_by(median_age) %>%
+  summarise(distinct_property_count = length(unique(token)), .groups = 'drop')
+
+# Check if distinct_count_df is empty
+if (nrow(distinct_count_df) == 0) {
+    # Display message if no data is available
+    plot.new()
+    text(0.5, 0.5, "No Data Available", cex = 1.5)
+  } else {
+Q1 <- quantile(distinct_count_df$distinct_property_count, 0.25)
+Q3 <- quantile(distinct_count_df$distinct_property_count, 0.75)
+IQR_value <- Q3 - Q1
+
+# Define the lower and upper bounds for non-outliers
+lower_bound <- Q1 - 1.5 * IQR_value
+upper_bound <- Q3 + 1.5 * IQR_value
+
+# Step 3: Filter out outliers based on the calculated bounds
+distinct_count_df_filtered <- distinct_count_df %>%
+  filter(distinct_property_count >= lower_bound & distinct_property_count <= upper_bound)
+
+# Step 2: Create the bar chart
+ggplot(distinct_count_df_filtered, aes(x = as.numeric(median_age), y = distinct_property_count)) +
+  #geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +
+  geom_point(color = "blue", size = 3, alpha = 0.4) +
+  geom_smooth(se = FALSE, color = "red", linewidth = 1) +  # Distribution line
+  labs(title = "Distinct Count of Property Names by Median Age",
+       x = "Median Age",
+       y = "Distinct Property Count") +
+  scale_y_continuous(breaks = seq(0, max(distinct_count_df$distinct_property_count), by = 10)) +  # Show only integer values on y-axis
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),  # Increase x-axis label font size
+    axis.title.y = element_text(size = 14),  # Increase y-axis label font size
+    axis.text.x = element_text(size = 12),   # Increase x-axis values font size
+    axis.text.y = element_text(size = 12)    # Increase y-axis values font size
+    )
+  }
+})
+```
+
+### <font size="5">**Properties By Household Income**</font>
+
+```{r}
+renderPlot({
+  
+distinct_count_df <- filtered_data() %>%
+  filter(median_hhi>0) %>%
+  group_by(median_hhi) %>%
+  summarise(distinct_property_count = length(unique(token)), .groups = 'drop')
+
+# Check if distinct_count_df is empty
+if (nrow(distinct_count_df) == 0) {
+    # Display message if no data is available
+    plot.new()
+    text(0.5, 0.5, "No Data Available", cex = 1.5)
+  } else {
+Q1 <- quantile(distinct_count_df$distinct_property_count, 0.25)
+Q3 <- quantile(distinct_count_df$distinct_property_count, 0.75)
+IQR_value <- Q3 - Q1
+
+# Define the lower and upper bounds for non-outliers
+lower_bound <- Q1 - 1.5 * IQR_value
+upper_bound <- Q3 + 1.5 * IQR_value
+
+# Step 3: Filter out outliers based on the calculated bounds
+distinct_count_df_filtered <- distinct_count_df %>%
+  filter(distinct_property_count >= lower_bound & distinct_property_count <= upper_bound)
+
+# Step 2: Create the bar chart
+ggplot(distinct_count_df_filtered, aes(x = as.numeric(median_hhi), y = distinct_property_count)) +
+  #geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +
+  geom_point(color = "blue", size = 3, alpha = 0.4) +
+  geom_smooth(se = FALSE, color = "red", linewidth = 1) +  # Distribution line
+  labs(title = "Distinct Count of Property Names by Median Household Income",
+       x = "Median Household Income",
+       y = "Distinct Property Count") +
+  theme_minimal() +
+  scale_x_continuous(labels = scales::dollar, breaks = scales::pretty_breaks(n=5)) +  # Format x-axis as whole numbers
+  scale_y_continuous(breaks = seq(0, max(distinct_count_df$median_hhi), by = 10)) +  # Show only integer values on y-axis
+  theme(
+    axis.title.x = element_text(size = 14),  # Increase x-axis label font size
+    axis.title.y = element_text(size = 14),  # Increase y-axis label font size
+    axis.text.x = element_text(size = 12),   # Increase x-axis values font size
+    axis.text.y = element_text(size = 12)    # Increase y-axis values font size
+    )
+  }
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="5">**HOA/COA Property Locations With Summit Network Overlay**</font>
+
+```{r, include=TRUE}
+renderLeaflet({
+
+  map_df <- filtered_data()  # Get the filtered processed_df
+
+  map_df <- map_df %>%
+  mutate(src = factor(src, levels = c("HOA", "SUNSHINE","TWG")))
+
+  # Define color palette for 'src' column
+  src_palette <- colorFactor(c("blue","green" ,"red"), domain = c("HOA", "SUNSHINE","TWG"))
+
+   labels <- paste0(
+    "<strong> Association Name: </strong>", map_df$property_name, "<br/>",
+    "<strong> Property Address: </strong>", map_df$property_address, "<br/>",
+    "<strong> Property City: </strong>", map_df$property_city, "<br/>",
+    "<strong> Zip: </strong>", map_df$property_zip, "<br/>",
+    "<strong> County: </strong>", map_df$property_cnty, "<br/>",
+    "<strong> Housing Units: </strong>", scales::comma(map_df$total_units, accuracy = 1), "<br/>",
+    "<strong> HOA/COA Fee: </strong>", scales::dollar(map_df$hoa_fee, accuracy = 1), "<br/>",
+    "<strong> Fee Frequency: </strong>", map_df$hoa_fee_freq, "<br/>",
+    "<strong> Distance to Network(miles): </strong>", scales::comma(map_df$dist, accuracy = 0.1), "<br/>",
+    "<strong> Property Type: </strong>", map_df$property_type, "<br/>",
+    "<strong> Board Member First Name: </strong>", map_df$board_fname, "<br/>",
+    "<strong> Board Member Last Name: </strong>", map_df$board_lname, "<br/>",
+    "<strong> Board Title: </strong>", map_df$board_title, "<br/>",
+    "<strong> Board Address: </strong>", map_df$board_address, "<br/>",
+    "<strong> Board City: </strong>", map_df$board_city, "<br/>",
+    "<strong> Board State: </strong>", map_df$board_state, "<br/>",
+    "<strong> Board Zip: </strong>", map_df$board_zip, "<br/>",
+    "<strong> Median Age: </strong>", scales::comma(map_df$median_age, accuracy = 0.1), "<br/>",
+    "<strong> Median HHI: </strong>", scales::dollar(map_df$median_hhi, accuracy = 1), "<br/>",
+    "<strong> House Value: </strong>", scales::dollar(map_df$house_value, accuracy = 1), "<br/>",
+    "<strong> FTTH Competition: </strong>", map_df$top_fiber_prov, "<br/>",
+    "<strong> FWA Competition: </strong>", map_df$top_fwa_prov, "<br/>",
+    "<strong> Cable Competition: </strong>", map_df$top_cable_prov, "<br/>"
+    ) %>%
+    lapply(htmltools::HTML)
+
+#map_df <- map_fcts %>%
+#  mutate_if(is.character, ~iconv(., from = "UTF-8", to = "UTF-8"))
+
+# labels <- iconv(labels, from = "UTF-8", to = "UTF-8")
+
+#kml <- st_transform(kml, st_crs(map_df))
+
+   leaflet() %>%
+    addProviderTiles(provider = "OpenStreetMap", options = providerTileOptions(opacity = 1)) %>%
+    addCircleMarkers(
+      data = map_df,
+      color = ~ src_palette(src),  # Apply the color palette based on 'src'
+      weight = 1,
+      opacity = 1,
+      fillOpacity = 0.70,
+      #radius = 10,
+      label = labels,  # Use label instead of popup for hover functionality
+      labelOptions = labelOptions(
+        style = list("font-weight" = "normal", padding = "3px 8px"),
+        textsize = "13px",
+        direction = "auto"
+      )
+    ) %>%
+    addKML(
+      kml,
+      stroke = TRUE, fillColor = "black", fillOpacity = 0, weight = 4,
+      markerOptions = markerOptions(radius = 1)
+    ) %>%
+    addLegend(
+      position = "bottomright",
+      pal = src_palette,
+      values = map_df$src,
+      title = "Data Source",
+      opacity = 1
+    )
+
+  })
+```
