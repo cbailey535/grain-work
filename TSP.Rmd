@@ -1,0 +1,606 @@
+---
+title: "Predictive Network Routing"
+output: 
+  flexdashboard::flex_dashboard:
+    theme:
+      version: 4
+      bootswatch: minty
+      primary: "#6CC3D4"
+    orientation: rows
+    vertical_layout: fill
+runtime: shiny
+resource_files:
+  - snow_cb_2023.csv
+  - dougcnty_roads.kml
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(flexdashboard)
+library(crosstalk)
+library(shiny)
+library(shinythemes)
+library(htmlwidgets)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(RColorBrewer)
+library(tidycensus)
+library(scales)
+library(TSP)
+library(geosphere)
+library(FinancialMath)
+library(memoise)
+```
+
+```{r, include=FALSE}
+library(doParallel)
+
+# Detect the number of cores available
+num_cores <- parallel::detectCores()
+
+# Create a parallel backend with the detected number of cores
+cl <- makeCluster(num_cores)
+
+# Register the parallel backend with foreach
+registerDoParallel(cl)
+
+
+# Read input files
+snow_cb_2023 <- readr::read_csv('snow_cb_2023.csv')
+kml_file <- sf::read_sf('dougcnty_roads.kml') %>% select(geometry)
+
+# Census data
+census_api_key('d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9', install = TRUE, overwrite = TRUE)
+options(tigris_use_cache = TRUE)
+vars20 <- c("P1_001N")
+block_shapes <- get_decennial(geography = "block", 
+                                variables = vars20,
+                                year = 2020,
+                                summary_var = "P1_001N", 
+                                state = "CO", 
+                                geometry = TRUE) %>%
+                                select(NAME,GEOID,geometry)
+
+# Prepare geo data
+geo_stat_df <- inner_join(snow_cb_2023, block_shapes, by = join_by(CENSUS_BLOCK == GEOID))
+geo_stat_sf <- sf::st_as_sf(geo_stat_df)
+
+
+# KML to points, clean and structure
+kml_sf_point <- st_cast(kml_file, "POINT")
+kml_geometry_df <- tibble(kml_sf_point)
+data_parsed <- kml_geometry_df %>%
+                  separate(geometry, into = c("lng", "lat"), sep = " ", convert = TRUE) %>%
+                  mutate(id = row_number(), 
+                         lat = gsub("[^0-9.-]", "", lat),
+                         lng = gsub("[^0-9.-]", "", lng)
+                         ) %>%
+                  mutate(lat = as.numeric(lat),
+                         lng = as.numeric(lng)
+                  ) 
+data_parsed_coord <- data_parsed %>% select(lng, lat)
+
+# Distance matrix and TSP setup
+dist_mat <-
+  as.matrix(
+    distm(data_parsed_coord, fun = distHaversine) # The shortest distance between two points (i.e., the 'great-circle-distance' or 'as the crow flies'
+  )/1609 #convert meters to miles
+rownames(dist_mat) <- data_parsed$id
+colnames(dist_mat) <- data_parsed$id
+tsp_prob <- TSP(dist_mat)
+tsp_prob <- insert_dummy(tsp_prob, label = 'dummy')
+
+# Create a memoised version of solve_TSP
+memoised_solve_TSP <- memoise(function(tsp_prob) {
+  solve_TSP(tsp_prob, method = "two_opt", control = list(rep = 5))
+})
+
+# Use the memoised version of solve_TSP
+tour <- memoised_solve_TSP(tsp_prob)
+
+
+#tour <-
+#  solve_TSP(
+#    tsp_prob,
+#    method = "two_opt",
+#    control = list(
+#    rep = 5)
+#    )
+path <- names(cut_tour(tour, 'dummy'))
+data_order <- data_parsed %>%
+  mutate(id_order = order(as.integer(path)))
+# TOUR(tour)
+# tour_length(tour)
+
+# path <- names(cut_tour(tour, 'dummy'))
+
+# Prepare the data for plotting
+#data_order <- data_parsed %>%
+#  mutate(id_order = order(as.integer(path)))
+
+# SharedData for interactivity
+sd <- SharedData$new(snow_cb_2023)
+
+# Predefined values for inputs
+pen_values <- seq(0, 100, by = 1)
+pen_select <- data.frame(Value = pen_values)
+cost_values <- seq(500, 5000, by = 100)
+cost_select <- data.frame(Value = cost_values)
+
+# Download handler for data
+output$downloadUI <- renderUI(downloadButton("downBtn", "Download Data", style = "width:100%"))
+output$downBtn <- downloadHandler(
+  filename = function() { "snow_cb_2023.csv" },
+  content = function(file) { write.csv(snow_cb_2023, file, row.names = FALSE) }
+)
+```
+
+Map {data-icon="fas fa-map-marked-alt"}
+==================================================
+
+Column {.sidebar data-width=400}
+----------------------------------------------------
+
+### <font size="5">**Inputs**</font>
+
+```{r}
+selectInput("cost",
+        label = "Cost per Passing $:",
+        choices = cost_select,
+        multiple = F)
+
+sliderInput("penetration", "Penetration %:",
+    min = 0, max = 100, value = 5
+  )
+
+sliderInput("arpu", "ARPU $:",
+    min = 0, max = 200, value = 5
+  )
+
+sliderInput("margin", "CF Margin %:",
+    min = 0, max = 100, value = 1
+  )
+
+uiOutput("downloadUI")
+```
+
+<font size="3">**Methodology:**</font> 
+
+- Linear Network Distance assumes the shortest distance between two points (i.e., the 'great-circle-distance' or 'as the crow flies'), according to the 'haversine method'. This method assumes a spherical earth, ignoring ellipsoidal effects.  The goal is to find the shortest tour (distance) that visits each housing unit in a given list.
+
+- IRR % assumes a 10-year cash flow stream with the initial investment taken from the Total Build Cost.
+
+- Road miles calculated using U.S. Census Bureau's Tiger/Line database for Rural/Urban functional system lane-length.
+
+- Competition and demographics attributes are calculated using the latest FCC Broadband Data Collection and U.S. Census ACS/Decennial database.
+
+- Total BEAD Eligible Locations include locations which are Unserved and Underserved and not "covered" by any other subsidy program.
+
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**Total Housing Units**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_1 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_1 <- round(sum(vbox_1$TOT_HOUSING_UNITS_CEN_2020),0)
+
+valueBox(value = format(value_1, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Linear Network Distance (Miles)**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_2 <- tour_length(tour) 
+    
+  value_2 <- round(sum(vbox_2),2)
+
+valueBox(value = format(value_2, nsmall = 0, big.mark = ","), icon = "fa-solid fa-diagram-project",  color = "primary")
+
+})
+```
+
+### <font size="3">**Passings per Mile**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_3 <- sd$data(withSelection = TRUE, withFilter = TRUE)
+    
+  value_3 <- round(sum(vbox_3$TOT_HOUSING_UNITS_CEN_2020 / tour_length(tour)),1)
+
+valueBox(value = format(value_3, nsmall = 0, big.mark = ","), icon = "fa-solid fa-house-chimney",  color = "primary")
+
+})
+```
+
+### <font size="3">**Average Cost per Passings**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_1 <- renderValueBox({
+  req(input$cost)
+  selected_cost <- cost_select$Value[cost_select$Value == input$cost]
+  if (length(selected_cost) == 0) {
+    return(NULL)
+  } else {
+    valueBox(value = scales::dollar(selected_cost, big.mark = ","), icon = "fa-solid fa-dollar-sign",  color = "primary")
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_1")
+```
+
+### <font size="3">**Total Build Cost**</font>
+
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_2 <- renderValueBox({
+  req(input$cost)
+  
+  # Find the value corresponding to the selected option
+  selected_cost <- cost_select$Value[cost_select$Value == input$cost]
+  customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  total_cost <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * selected_cost)),0)
+  # Return the valueGauge
+  if (length(total_cost) == 0) {
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    valueBox(value = scales::dollar(total_cost, big.mark = ","), icon = "fa-solid fa-person-digging",  color = "primary")
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_2")
+```
+
+### <font size="3">**Penetration %**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$gauge <- renderGauge({
+  value <- req(input$penetration)
+  
+  # Find the value corresponding to the selected option
+  # value <- pen_select$Value[pen_select$Value == input$penetration]
+  # value <- input$penetration
+  
+  # Return the valueGauge
+  if (length(value) == 0) {
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    gauge(value, symbol = '%', min = 0, max = 100, 
+          gaugeSectors(
+            success = c(75, 100),
+            warning = c(50, 75),
+            danger = c(0, 50)
+    ))
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+gaugeOutput("gauge")
+```
+
+### <font size="3">**Customers**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_3 <- renderValueBox({
+  req(input$penetration)
+  
+  # Find the value corresponding to the selected option
+  pen <- pen_select$Value[pen_select$Value == input$penetration]
+  customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  value_7 <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * (pen/100))),0)
+  # Return the valueGauge
+  if (length(value_7) == 0) {
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    valueBox(value = format(value_7, nsmall = 0, big.mark = ","), icon = "fa-solid fa-user-plus",  color = "primary")
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_3")
+```
+
+### <font size="3">**Target ARPU $**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_4 <- renderValueBox({
+  arpu_amt <- req(input$arpu)
+  
+  # Find the value corresponding to the selected option
+  # pen <- pen_select$Value[pen_select$Value == input$penetration]
+  # customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  # value_7 <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * (pen/100))),0)
+  # Return the valueGauge
+  if (length(arpu_amt) == 0) {
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    valueBox(value = scales::dollar(arpu_amt, big.mark = ","), icon = "fa-solid fa-dollar-sign",  color = "primary")
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_4")
+```
+
+### <font size="3">**Annual Revenue Potential**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_5 <- renderValueBox({
+  arpu_amt <- req(input$arpu)
+  pen <- req(input$penetration)
+  
+  customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  value_8 <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * (pen/100)) * arpu_amt*12),0)
+  
+  # Find the value corresponding to the selected option
+  # pen <- pen_select$Value[pen_select$Value == input$penetration]
+  # customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  # value_7 <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * (pen/100))),0)
+  # Return the valueGauge
+  if (length(value_8) == 0) {
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    valueBox(value = scales::dollar(value_8, big.mark = ","), icon = "fa-solid fa-dollar-sign",  color = "primary")
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_5")
+```
+
+### <font size="3">**IRR %**</font>
+
+```{r}
+# Define server logic to dynamically update the valueGauge based on user input
+output$box_6 <- renderValueBox({
+ 
+  req(input$cost)
+  
+  # Find the value corresponding to the selected option
+  selected_cost <- cost_select$Value[cost_select$Value == input$cost]
+  customers <- sd$data(withSelection = TRUE, withFilter = TRUE)
+  total_cost <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * selected_cost)),0)
+  
+  arpu_amt <- req(input$arpu)
+  pen <- req(input$penetration)
+  margin_pct <- req(input$margin)
+  annual_revenue <- round(sum(ifelse(customers$TOT_HOUSING_UNITS_CEN_2020==0, 0, customers$TOT_HOUSING_UNITS_CEN_2020 * (pen/100) * (arpu_amt*12)) * (margin_pct/100)),0)
+
+  calculate_irr <- function(investment_amt, revenue) {
+  # Create cash flow vector
+  cash_flows <- c(-investment_amt, revenue)
+  
+  # Define function to calculate NPV
+  npv_function <- function(rate, cash_flows) {
+    sum(cash_flows / (1 + rate)^(0:(length(cash_flows)-1)))
+  }
+  
+  # Use uniroot to find IRR
+  # irr <- uniroot(npv_function, interval = c(-1, 1), cash_flows = cash_flows)$root
+  irr <- uniroot(npv_function, interval = c(-1, 1), cash_flows = cash_flows)$root
+  
+  return(irr)
+}
+
+# Example usage
+investment_amt <- total_cost  # Example investment amount
+revenue <- rep(annual_revenue,10)  # Enter a single value for annual, 4 values for quarterly, and 12 values for monthly
+irr <- calculate_irr(investment_amt, revenue)
+irr_value <- print(paste(round(irr * 100, 2), "%"))
+   
+  if(is.infinite(irr) && is.nan(irr) && is.na(irr)) { 
+    # Handle case when no matching value is found
+    return(NULL)
+  } else {
+    # Create and return the valueGauge
+    valueBox(value = irr_value, icon = "ffa-solid fa-dollar-sign",  color = if(irr_value >0){
+          color = "green"
+      } else {
+          color = "red"
+      })
+  }
+})
+
+```
+
+```{r}
+# Display the valueGauge
+valueBoxOutput("box_6")
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="3">**HUs With Access To Copper**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_7 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_7 <- round(sum(ifelse(vbox_7$COPPER_LOCATION_ID_CNT==0, 0, vbox_7$COPPER_LOCATION_ID_CNT)/(sum(vbox_7$TOTAL_RESIDENTIAL_LOCATION_IDS))),1)
+
+valueBox(value = scales::percent(value_7, scale = 100, suffix = "%", big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**HUs With Access To Cable**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_8 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_8 <- round(sum(ifelse(vbox_8$CABLE_LOCATION_ID_CNT==0, 0, vbox_8$CABLE_LOCATION_ID_CNT)/(sum(vbox_8$TOTAL_RESIDENTIAL_LOCATION_IDS))),1)
+
+valueBox(value = scales::percent(value_8, scale = 100, suffix = "%", big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**HUs With Access To FTTH**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_9 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_9 <- round(sum(ifelse(vbox_9$FTTH_LOCATION_ID_CNT==0, 0, vbox_9$FTTH_LOCATION_ID_CNT)/(sum(vbox_9$TOTAL_RESIDENTIAL_LOCATION_IDS))),1)
+
+valueBox(value = scales::percent(value_9, scale = 100, suffix = "%", big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**HUs With Access To FWA**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_10 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_10 <- round(sum(ifelse(vbox_10$FWA_LOCATION_ID_CNT==0, 0, vbox_10$FWA_LOCATION_ID_CNT)/(sum(vbox_10$TOTAL_RESIDENTIAL_LOCATION_IDS))),1)
+
+valueBox(value = scales::percent(value_10, scale = 100, suffix = "%", big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**Unserved/Underserved HUs**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_11 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_11 <- round(sum(vbox_11$UNSERVED_PLUS_UNDERSERVED),1)
+
+valueBox(value = format(value_11, nsmall = 0, big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**Single-Family HUs**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_12 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_12 <- round(sum(vbox_12$SINGLE_UNIT_ACS_16_20),0)
+
+valueBox(value = format(value_12, nsmall = 0, big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+### <font size="3">**Single-Family %**</font>
+
+```{r}
+renderValueBox({
+  
+  vbox_13 <- sd$data(withSelection = TRUE, withFilter = TRUE) 
+    
+  value_13 <- round(sum(ifelse(vbox_13$SINGLE_UNIT_ACS_16_20==0, 0, vbox_13$SINGLE_UNIT_ACS_16_20)/(sum(vbox_13$TOT_HOUSING_UNITS_CEN_2020))),2)
+
+valueBox(value = scales::percent(value_13, scale = 100, suffix = "%", big.mark = ","), icon = "fa-solid fa-square-poll-vertical",  color = "primary")
+
+})
+```
+
+Row
+-----------------------------------------------------------------
+
+### <font size="5">**Optimal Network Path Analysis**</font>
+
+```{r}
+renderLeaflet({
+  
+  data_order %>%
+  arrange(id_order) %>%
+  leaflet() %>%
+  addTiles() %>%
+  addProviderTiles(
+    provider = "OpenRailwayMap",
+    group = "OpenRailwayMap"
+  ) %>%
+  # addPolygons(
+  #   data = geo_stat_sf$geometry,
+  #   # fillColor = ~ get('colorBin')(colorPal, domain)(BEAD_PER_ROAD_MILE),
+  #   weight = 1,
+  #   opacity = 0.5,
+  #   color = "black",
+  #   fillOpacity = 0,
+  #   # popup = labels
+  # ) %>%
+  # addCircleMarkers(
+  #   ~lng,
+  #   ~lat,
+  #   fillColor = 'red',
+  #   fillOpacity = 0.2,
+  #   stroke = FALSE
+  # ) %>%
+  addPolylines(
+    ~lng,
+    ~lat,
+    fill = FALSE,
+    color = '#03F',
+    weight = 3,
+    opacity = 0.9,
+    noClip = TRUE,
+    smoothFactor = 1,
+    # fillColor = 'red',
+    # fillOpacity = 0.5,
+    stroke = TRUE
+    )
+  
+})
+```
+
