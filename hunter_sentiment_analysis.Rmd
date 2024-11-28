@@ -1,0 +1,769 @@
+---
+title: "Untitled"
+author: "Chris Bailey"
+date: "2023-04-28"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r libraries}
+library(rtweet)
+library(tidyverse)
+library(topicmodels)
+# library(flexdashboard)
+# library(shiny)
+# library(shinythemes)
+# library(openintro)
+# library(knitr)
+library(scales)
+library(tidytext) 
+# library(broom)
+# library(purrr)
+library(textdata)
+library(plotly)
+library(wordcloud)
+library(RColorBrewer)
+library(reshape2)
+library(ggraph)
+library(igraph)
+library(ggrepel)
+library(grid)
+# library(crosstalk)
+# library(htmlwidgets)
+# library(htmltools)
+library(DT)
+library(tm)
+library(widyr)
+library(stm)
+library(tidyr)
+library(janitor)
+
+theme_set(theme_light())
+
+mycolors <- c("blue", "#FFC125", "darkgreen", "darkorange")
+```
+
+# Load Data
+```{r}
+hunter_sentiment_raw <- janitor::clean_names(hunter_sentiment_data)
+
+hunter_sentiment_processed <- hunter_sentiment_raw %>% 
+  select(-x7_i_am_able_to_clearly_understand_my_bill) %>%
+  mutate(survey_date = as.Date(survey_date)) %>%
+  filter(!is.na(x11_please_share_any_other_comments_that_you_may_have))
+
+hunter_sentiment_copy <- hunter_sentiment_processed
+
+afinn <- afinn_111
+
+```
+
+# Tokenize and Compute Sentiment
+```{r}
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("https\\S*", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("@\\S*", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("amp", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("[\r\n]", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("[[:punct:]]", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+replace_reg1 <- "https://t.co/[A-Za-z\\d]+|" 
+replace_reg2 <- "http://[A-Za-z\\d]+|&amp;|&lt;|&gt;|RT|https+|" 
+replace_reg <- paste0(replace_reg1, replace_reg2) 
+unnest_reg <- "([^A-Za-z_\\d#@']|'(?![A-Za-z_\\d#@]))"
+# remove_words <- c(""
+#                   )
+tidy_tweets <- hunter_sentiment_copy %>%
+  # filter(!str_detect(text, "^RT")) %>%
+  mutate(text = str_replace_all(x11_please_share_any_other_comments_that_you_may_have, replace_reg, "")) %>% 
+  # unnest_tokens(word, text, token = "tweets", strip_punct =TRUE) %>%
+  unnest_tokens(word, x11_please_share_any_other_comments_that_you_may_have, token = "regex", pattern = unnest_reg) %>%
+  filter(
+        # !word %in% stop_words$word,
+         # !word %in% str_remove_all(stop_words$word, "'"),
+         # !word %in% remove_words,
+         str_detect(word, "[a-z]"))
+
+tidy_tweets_copy <- tidy_tweets 
+
+tweet_sentiment <- tidy_tweets_copy %>%
+    # unnest_tokens(word, TweetText, token = "tweets") %>%
+    inner_join(afinn, by = "word") %>%
+  mutate(polarity = ifelse(value>0,"Positive", ifelse(value<0, "Negative", "Neutral")))
+
+sentiment_scores <- hunter_sentiment_copy %>%
+    left_join(tweet_sentiment %>%
+                  group_by(respondent_number) %>%
+                  summarise(score = sum(value))) %>%
+    replace_na(list(score = 0)) %>%
+   ungroup() %>%
+  mutate(polarity = ifelse(score>0,"Positive", ifelse(score<0, "Negative", "Neutral")))
+
+sentiment_stats <- tweet_sentiment %>%
+  select(region,
+         transport,
+         respondent_number,
+         x1_considering_my_complete_experience_with_hunter_communicaitons_i_would_recommend_you_and_your_services_to_a_friend_family_member_or_colleague,
+         x3_i_receive_value_for_the_money_paid,
+         x4_hunters_service_has_been_reliable_and_i_trust_it_to_work_properly_for_me,
+         x5_i_am_getting_the_internet_speeds_that_i_expect,
+         x6_the_billing_i_receive_is_accurate_and_contains_no_surprises,
+         # x7_i_am_able_to_clearly_understand_my_bill,
+         x8_you_always_address_my_concerns_in_a_professional_and_timely_manner,
+         x9_you_always_treat_me_well_and_effectively_communicate_with_me,
+         value
+         ) %>%
+  group_by(region, transport, respondent_number) %>%
+  summarise(sentiment = sum(value),
+            nps = mean(x1_considering_my_complete_experience_with_hunter_communicaitons_i_would_recommend_you_and_your_services_to_a_friend_family_member_or_colleague),
+            value = mean(x3_i_receive_value_for_the_money_paid),
+            reliability = mean(x4_hunters_service_has_been_reliable_and_i_trust_it_to_work_properly_for_me),
+            speed = mean(x5_i_am_getting_the_internet_speeds_that_i_expect),
+            accurate_billing = mean(x6_the_billing_i_receive_is_accurate_and_contains_no_surprises),
+            # understand_bill = mean(x7_i_am_able_to_clearly_understand_my_bill),
+            professional = mean(x8_you_always_address_my_concerns_in_a_professional_and_timely_manner),
+            effective_communication = mean(x9_you_always_treat_me_well_and_effectively_communicate_with_me)
+            ) %>%
+  mutate(polarity = ifelse(sentiment>0,"Positive", ifelse(sentiment<0, "Negative", "Neutral")))
+
+```
+
+# Run Correlation Analysis
+```{r}
+df_sc <- sentiment_stats %>%
+  filter(transport %in% "Fiber") %>%
+  ungroup() %>%
+  select(-c(1:3,5,12)) %>%
+  drop_na() %>%
+  mutate_if(is.numeric, scale)
+
+M = cor(df_sc)
+
+# corrplot::corrplot(M, method = 'number', order = 'alphabet', diag = F) # colorful number
+# 
+# PerformanceAnalytics::chart.Correlation(df_sc, histogram=FALSE, pch="+")
+
+psych::pairs.panels(df_sc,
+             gap = 0,
+             # bg = c("red","blue","green","gray80")[sent_raw$company],
+             pch = 21,
+             cex.cor = 1.5,
+             cex.labels = 1.5,
+             stars = T,
+             show.points = T,
+             ellipses = T,
+             density = T
+             )
+
+df_corr <- data.frame(df_sc)
+
+nps_corr_tbl <- df_corr %>%
+  cor(y = df_corr$sentiment) %>%
+  as_tibble(rownames = "feature") %>% 
+  dplyr::rename(sentiment = V1) %>%
+  # separate(feature, into = c("feature", "bin"), sep = "_") %>%
+  filter(!is.na(sentiment)) %>%
+  filter(!str_detect(feature, "sentiment")) %>%
+  arrange(desc(abs(sentiment))) %>%
+  mutate(feature = as_factor(feature) %>% fct_rev())
+
+nps_corr_tbl %>%
+  ggplot(aes(x = sentiment, y = feature, text = feature)) +
+  geom_vline(xintercept = 0, linetype = 2, color = "red", size = 1) +
+  geom_point(color = "royalblue", size=5, alpha=.9) +
+  ggrepel::geom_text_repel(aes(sentiment, y = feature,label = feature), size = 4, color = "royalblue") +
+  expand_limits(x = c(-1, 1)) +
+  tidyquant::theme_tq() +
+  labs(title = "Sentiment Correlation - Fiber",
+       subtitle = "Hunter",
+       y = "", x = "Correlation to sentiment (dependent variable)") +
+  theme(axis.text.y=element_blank())
+
+sent_corr_tbl <- df_corr %>%
+  cor(y = df_corr$sentiment) %>%
+  as_tibble(rownames = "feature") %>% 
+  dplyr::rename(sentiment = V1) %>%
+  # separate(feature, into = c("feature", "bin"), sep = "_") %>%
+  filter(!is.na(sentiment)) %>%
+  filter(!str_detect(feature, "sentiment")) %>%
+  arrange(desc(abs(sentiment))) %>%
+  mutate(feature = as_factor(feature) %>% fct_rev())
+
+sent_corr_tbl %>%
+  ggplot(aes(x = sentiment, y = feature, text = feature)) +
+  geom_vline(xintercept = 0, linetype = 2, color = "red", size = 1) +
+  geom_point(color = "royalblue", size=5, alpha=.9) +
+  ggrepel::geom_text_repel(aes(sentiment, y = feature,label = feature), size = 4, color = "royalblue") +
+  expand_limits(x = c(-1, 1)) +
+  tidyquant::theme_tq() +
+  labs(title = "Sentiment Correlation",
+       subtitle = "Hunter",
+       y = "", x = "Correlation to Sentiment (dependent variable)") +
+  theme(axis.text.y=element_blank())
+```
+
+# Sentiment by Region
+```{r}
+
+sentiment_by_region <- sentiment_scores %>%
+    group_by(region) %>%
+    summarise(sentiment = mean(score),
+              size = n()) %>%
+  filter(!is.na(sentiment)) %>%
+    ungroup()
+  
+  group <- unique(tweet_sentiment$region)
+  
+  ggplot(sentiment_by_region, aes(x = sentiment, y = region, color = region)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Region", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+# Sentiment by Transport
+```{r}
+
+sentiment_by_transport <- tweet_sentiment %>%
+    group_by(transport) %>%
+    summarise(sentiment = mean(value),
+              size = n()) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_transport$transport)
+  
+  ggplot(sentiment_by_transport, aes(x = sentiment, y = transport, color = transport)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Transport Type", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+# Sentiment by Age Group
+```{r}
+
+sentiment_by_age <- tweet_sentiment %>%
+    group_by(x12_age) %>%
+    summarise(sentiment = mean(value),
+              size = n()) %>%
+    filter(!is.na(x12_age)) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_age$x12_age)
+  
+  ggplot(sentiment_by_age, aes(x = sentiment, y = x12_age, color = x12_age)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Age Group", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+
+# Sentiment by HHI
+```{r}
+
+sentiment_by_hhi <- tweet_sentiment %>%
+    group_by(x15_household_income) %>%
+    summarise(sentiment = mean(value),
+              size = n()) %>%
+    filter(!is.na(x15_household_income)) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_hhi$x15_household_income)
+  
+  ggplot(sentiment_by_hhi, aes(x = sentiment, y = x15_household_income, color = x15_household_income)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Household Income", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+# Sentiment by Education
+```{r}
+
+sentiment_by_edu <- tweet_sentiment %>%
+    group_by(x14_education) %>%
+    summarise(sentiment = mean(value),
+              size = n()) %>%
+    filter(!is.na(x14_education)) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_edu$x14_education)
+  
+  ggplot(sentiment_by_edu, aes(x = sentiment, y = x14_education, color = x14_education)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Education", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+# Sentiment by Children <18
+```{r}
+
+sentiment_by_children <- tweet_sentiment %>%
+    group_by(x16_number_of_children_under_18) %>%
+    summarise(sentiment = mean(value),
+              size = n()) %>%
+    filter(!is.na(x16_number_of_children_under_18)) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_children$x16_number_of_children_under_18)
+  
+  ggplot(sentiment_by_children, aes(x = sentiment, y = x16_number_of_children_under_18, color = x16_number_of_children_under_18)) +
+    geom_point(size = 8) +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 6) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-5,5)) +
+    labs(title = "Sentiment By Number Of Children Under 18", subtitle = "Hunter Communications", x = "More Negative             Neutral               More Positive", y = NULL)
+```
+
+
+# Sentiment Contribution by Key Word: Wireless
+```{r}
+words_by_region_fiber <- tweet_sentiment %>%
+  filter(transport=="Wireless", !word=="no") %>%
+  count(word, sort = TRUE) 
+
+  contributions_fiber <- words_by_region_fiber %>%
+  inner_join(afinn, by = "word") %>%
+  group_by(word) %>%
+  summarise(contribution = n*value)  %>%
+  arrange(contribution)
+
+  contributions_fiber %>%
+  slice_max(abs(contribution), n = 15) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(contribution, word, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  # facet_wrap(~region, scales = "free") + 
+  theme(text = element_text(size=16),
+        axis.title.x=element_text(size=12),
+        strip.background = element_rect(fill = "blue"),
+        strip.text = element_text(size = 12, color = "white")) +
+  labs(title = "Sentiment Drivers By Key Word", subtitle = "Wireless", x = "Sentiment Contribution", y = "")
+```
+
+# Sentiment Contribution by Key Word: Fiber
+```{r}
+words_by_region_wireless <- tweet_sentiment %>%
+  filter(transport=="Fiber") %>%
+  count(region, word, sort = TRUE) %>%
+  ungroup()
+
+  contributions_wireless <- words_by_region_wireless %>%
+  inner_join(afinn, by = "word") %>%
+  group_by(region,word) %>%
+  summarise(occurences = n(),
+            contribution = sum(value)) 
+
+  contributions_wireless %>%
+  slice_max(abs(contribution), n = 5) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(contribution, word, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~region, scales = "free") + 
+  theme(text = element_text(size=16),
+        axis.title.x=element_blank(),
+        strip.background = element_rect(fill = "blue"),
+        strip.text = element_text(size = 12, color = "white")) +
+  labs(title = "Sentiment Drivers By Key Word", subtitle = "Fiber", x = "Sentiment Contribution", y = "")
+```
+
+
+<!-- ```{r} -->
+<!-- trigrams_filtered <- hunter_sentiment_copy %>% -->
+<!--   unnest_tokens(trigram, x11_please_share_any_other_comments_that_you_may_have, token = "ngrams", n = 3) %>% -->
+<!--   filter(!is.na(trigram)) %>% -->
+<!--   separate(trigram, c("word1", "word2", "word3"), sep = " ") %>% -->
+<!--   filter(!word1 %in% stop_words$word, -->
+<!--          !word2 %in% stop_words$word, -->
+<!--          !word3 %in% stop_words$word) %>% -->
+<!--   count(word1, word2, word3, sort = TRUE) -->
+
+<!--   trigrams_united <- trigrams_filtered %>% -->
+<!--   unite(trigram, word1, word2, word3, sep = " ") -->
+
+<!-- # trigrams_united -->
+
+<!--   trigram_graph <- trigrams_filtered %>% -->
+<!--   filter(n >= 2) %>% -->
+<!--   graph_from_data_frame() -->
+
+<!-- # trigram_graph -->
+
+<!--   set.seed(2020) -->
+
+<!--   a <- grid::arrow(type = "closed", length = unit(.15, "inches")) -->
+
+<!--   ggraph(trigram_graph, layout = "fr") + -->
+<!--   geom_edge_link(aes(edge_alpha = n), show.legend = FALSE, -->
+<!--                  arrow = a, end_cap = circle(.07, 'inches')) + -->
+<!--   geom_node_point(color = "blue", size = 5, alpha = 0.6) + -->
+<!--   geom_node_text(aes(label = name), size = 5, vjust = 1, hjust = 1) + -->
+<!--   theme_void() -->
+<!-- ``` -->
+
+# Topic Analysis
+```{r}
+
+topic_df <- sentiment_scores %>%
+  select(x11_please_share_any_other_comments_that_you_may_have,polarity) %>%
+  filter(!is.na(x11_please_share_any_other_comments_that_you_may_have))
+
+processed <- textProcessor(topic_df$x11_please_share_any_other_comments_that_you_may_have,
+                           metadata = topic_df[2],
+                           lowercase=TRUE, 
+                           removestopwords=TRUE, 
+                           removenumbers=TRUE,  
+                           removepunctuation=TRUE, 
+                           stem=TRUE, 
+                           wordLengths=c(3,Inf),  
+                           sparselevel=1, 
+                           language="en",  
+                           verbose=TRUE, 
+                           onlycharacter= FALSE, 
+                           striphtml=FALSE, 
+                           customstopwords=NULL)
+
+topic_df_remove1 <- topic_df[-processed$docs.removed,]
+
+out <- prepDocuments(processed$documents,
+                     processed$vocab,
+                     processed$meta)
+
+topic_df_remove2 <- topic_df_remove1[-out$docs.removed,]
+
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+
+
+First_STM <- stm(documents = out$documents,
+                 vocab = out$vocab,
+                 prevalence = ~polarity,
+                 K=6,
+                 max.em.its = 50,
+                 data = out$meta,
+                 init.type = "Spectral",
+                 verbose = FALSE)
+
+predict_topics <- estimateEffect(1:6 ~ polarity, stmobj = First_STM, metadata = out$meta, uncertainty = "Global")
+
+thought <- findThoughts(First_STM,
+             texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have,
+             n = 2,
+             topics = c(1:6))
+
+thoughts1 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 1)$docs[[1]]
+thoughts2 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 2)$docs[[1]]
+thoughts3 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 3)$docs[[1]]
+thoughts4 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 4)$docs[[1]]
+thoughts5 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 5)$docs[[1]]
+thoughts6 <- findThoughts(First_STM, texts = topic_df_remove2$x11_please_share_any_other_comments_that_you_may_have, n = 1, topics = 6)$docs[[1]]
+
+par(mfrow = c(1, 6), mar = c(0.5, 0.5, 1, 0.5))
+plotQuote(thoughts1, width = 20, text.cex = 2, main = "More Positive")
+plotQuote(thoughts2, width = 20, text.cex = 2, main = "More Negative")
+plotQuote(thoughts3, width = 20, text.cex = 2, main = "More Negative")
+plotQuote(thoughts4, width = 20, text.cex = 2, main = "More Neutral")
+plotQuote(thoughts5, width = 20, text.cex = 2, main = "More Neutral")
+plotQuote(thoughts6, width = 20, text.cex = 2, main = "More Negative")
+
+dev.off()
+plot(First_STM, cex.main=1.25, cex.lab=1.25, cex.axis=1)
+
+dev.off()
+plot(predict_topics, covariate = "polarity",
+     topics = c(1, 2, 3, 4, 5, 6),
+     model = First_STM,
+     method = "difference",
+     cov.value1 = "Positive",
+     cov.value2 = "Negative",
+     xlab = "More Negative ... More Positive",
+     ylab = "Effect of Positive vs. Negative",
+     xlim = c(-0.2, 0.2),
+     # expand_limits(x = c(-0.4, 0.4)),
+     labeltype = "custom",
+     custom.labels = c('Topic 1',
+                       'Topic 2',
+                       'Topic 3',
+                       'Topic 4',
+                       'Topic 5',
+                       'Topic 6'
+                       ), cex.lab=1.25, cex.axis=1)
+
+dev.off()
+plot(predict_topics, covariate = "polarity",
+     topics = c(1, 2, 3, 4, 5, 6),
+     model = First_STM,
+     method = "difference",
+     cov.value1 = "Positive",
+     cov.value2 = "Negative",
+     xlab = "More Negative ... More Positive",
+     ylab = "Effect of Positive vs. Negative",
+     xlim = c(-0.2, 0.2),
+     # expand_limits(x = c(-0.4, 0.4)),
+     labeltype = "custom",
+     custom.labels = c('Topic 1',
+                       'Topic 2',
+                       'Topic 3',
+                       'Topic 4',
+                       'Topic 5',
+                       'Topic 6'
+                       ), cex.lab=1.25, cex.axis=1)
+
+```
+
+#  Corrrelation Analysis
+```{r}
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("https\\S*", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("@\\S*", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("amp", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("[\r\n]", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have <-  gsub("[[:punct:]]", "", hunter_sentiment_copy$x11_please_share_any_other_comments_that_you_may_have)
+replace_reg1 <- "https://t.co/[A-Za-z\\d]+|" 
+replace_reg2 <- "http://[A-Za-z\\d]+|&amp;|&lt;|&gt;|RT|https+|" 
+replace_reg <- paste0(replace_reg1, replace_reg2) 
+unnest_reg <- "([^A-Za-z_\\d#@']|'(?![A-Za-z_\\d#@]))"
+remove_words <- c("hunter","communications","lot","spectrum","comcast","nw")
+
+tidy_tweets_corr <- hunter_sentiment_copy %>%
+  # filter(!str_detect(text, "^RT")) %>%
+  mutate(text = str_replace_all(x11_please_share_any_other_comments_that_you_may_have, replace_reg, "")) %>% 
+  # unnest_tokens(word, text, token = "tweets", strip_punct =TRUE) %>%
+  unnest_tokens(word, x11_please_share_any_other_comments_that_you_may_have, token = "regex", pattern = unnest_reg) %>%
+  filter(
+        !word %in% stop_words$word,
+        !word %in% str_remove_all(stop_words$word, "'"),
+         !word %in% remove_words,
+         str_detect(word, "[a-z]"))
+
+keyword_cors <- tidy_tweets_corr %>%
+  group_by(word) %>%
+  filter(n()>=4) %>%
+  pairwise_cor(word, respondent_number, sort = TRUE, upper = FALSE)
+
+set.seed(1234)
+# par(mar=c(.1,.1,.1,.1))
+keyword_cors %>%
+  filter(correlation >= .34) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation, edge_width = correlation), edge_colour = "royalblue") +
+  geom_node_point(size = 5) +
+  geom_node_text(aes(label = name), size=6, repel = TRUE,
+                 point.padding = unit(0.2, "lines")) +
+  theme_void()
+```
+
+# Reviews with Scores
+```{r}
+
+  reviews <- sentiment_scores 
+# %>%
+#     filter(polarity != "Neutral") 
+# %>%
+#     mutate(sentiment = ifelse(polarity == "Positive",
+#                          as.character(icon("smile", lib = "font-awesome")),
+#                          as.character(icon("frown", lib = "font-awesome"))))
+
+  datatable(reviews[,c(1:2,24,32)],
+          # caption = "REVIEWS",
+          rownames = FALSE,
+          colnames = c(
+            "REGION" = "region",
+            "TRANSPORT" = "transport",
+            "REVIEW" = "x11_please_share_any_other_comments_that_you_may_have",
+            "SENTIMENT" = "polarity"
+          ),
+          filter = "top",
+          options = list(
+            order = list(1, 'desc'),
+            pageLength=25,
+            scrollY = '800px',
+            pageLength = 1000,
+            autoWidth=FALSE)) %>% formatStyle(
+  'SENTIMENT',
+  backgroundColor = styleEqual(c('Negative','Neutral','Positive'), c('red', 'yellow', 'green')),
+  fontWeight = 'bold'
+)
+
+```
+
+
+
+## Factor Analysis
+# https://www.geo.fu-berlin.de/en/v/soga/Geodata-analysis/factor-analysis/A-simple-example-of-FA/index.html
+```{r}
+library(caret)
+
+# sentiment_scores <- sentiment_scores %>% rename(sentiment = sum(value),
+#             nps = mean(x1_considering_my_complete_experience_with_hunter_communicaitons_i_would_recommend_you_and_your_services_to_a_friend_family_member_or_colleague),
+#             value = mean(x3_i_receive_value_for_the_money_paid),
+#             reliability = mean(x4_hunters_service_has_been_reliable_and_i_trust_it_to_work_properly_for_me),
+#             speed = mean(x5_i_am_getting_the_internet_speeds_that_i_expect),
+#             accurate_billing = mean(x6_the_billing_i_receive_is_accurate_and_contains_no_surprises),
+#             understand_bill = mean(x7_i_am_able_to_clearly_understand_my_bill),
+#             professional = mean(x8_you_always_address_my_concerns_in_a_professional_and_timely_manner),
+#             effective_communication = mean(x9_you_always_treat_me_well_and_effectively_communicate_with_me)
+# 
+# names(new_sent_score)
+sent_scores <- sentiment_scores %>%
+  mutate(region = as.factor(region),
+         transport = as.factor(transport)) %>%
+  drop_na(c(17:22))
+    
+dmy_vars <-  caret::dummyVars("~.", data = sent_scores[,c(1:2)])
+trsf <- data.frame(predict(dmy_vars, newdata = sent_scores))
+new_sent_score <- cbind(sent_scores,trsf) %>%
+  select(
+    x3_i_receive_value_for_the_money_paid,
+    x4_hunters_service_has_been_reliable_and_i_trust_it_to_work_properly_for_me,
+    x5_i_am_getting_the_internet_speeds_that_i_expect,
+    x6_the_billing_i_receive_is_accurate_and_contains_no_surprises,
+    # x7_i_am_able_to_clearly_understand_my_bill,
+    x8_you_always_address_my_concerns_in_a_professional_and_timely_manner,
+    x9_you_always_treat_me_well_and_effectively_communicate_with_me,
+    # x1_considering_my_complete_experience_with_hunter_communicaitons_i_would_recommend_you_and_your_services_to_a_friend_family_member_or_colleague,
+    transport.Fiber
+    # score
+  ) %>%
+  rename(
+    # sentiment = score,
+    # nps = x1_considering_my_complete_experience_with_hunter_communicaitons_i_would_recommend_you_and_your_services_to_a_friend_family_member_or_colleague,
+    value = x3_i_receive_value_for_the_money_paid,
+    reliability = x4_hunters_service_has_been_reliable_and_i_trust_it_to_work_properly_for_me,
+    speed = x5_i_am_getting_the_internet_speeds_that_i_expect,
+    accurate_billing = x6_the_billing_i_receive_is_accurate_and_contains_no_surprises,
+    # understand_bill = x7_i_am_able_to_clearly_understand_my_bill,
+    professional = x8_you_always_address_my_concerns_in_a_professional_and_timely_manner,
+    effective_communication = x9_you_always_treat_me_well_and_effectively_communicate_with_me,
+    fiber = transport.Fiber
+  ) %>%
+  mutate_if(is.numeric, scale)
+
+psych::pairs.panels(new_sent_score,
+             gap = 0,
+             # bg = c("red","blue","green","gray80")[sent_raw$company],
+             pch = 21,
+             cex.cor = 1.5,
+             cex.labels = 1.5,
+             stars = T,
+             show.points = T,
+             ellipses = T,
+             density = T
+             )  
+
+
+# food.fa <- factanal(rcn.fa[,-1], factors = 2)
+# 
+# food.fa.none <- factanal(rcn.fa[,-1], factors = 2, rotation = "none")
+food.fa.varimax <- factanal(new_sent_score, factors = 2, rotation = "promax")
+food.fa.varimax
+
+# A high uniqueness for a variable indicates that the factors do not account well for its variance.
+
+# food.fa.promax <- factanal(rcn.fa[,-1], factors = 2, rotation = "promax")
+# par(mfrow = c(1,3))
+# plot(food.fa.none$loadings[,1], 
+#      food.fa.none$loadings[,2],
+#      xlab = "Factor 1", 
+#      ylab = "Factor 2", 
+#      ylim = c(-1,1),
+#      xlim = c(-1,1),
+#      main = "No rotation")
+# abline(h = 0, v = 0)
+dev.off()
+plot(food.fa.varimax$loadings[,1], 
+     food.fa.varimax$loadings[,2],
+     xlab = "Factor 1", 
+     ylab = "Factor 2", 
+     ylim = c(-1.1,1.1),
+     xlim = c(-1.1,1.1),
+     main = "Hunter Communications VOC Survey Factor Analysis")
+text(food.fa.varimax$loadings[,1]-0.08, 
+     food.fa.varimax$loadings[,2]+0.06,
+      colnames(new_sent_score),
+      col="blue",
+      cex = 1.5)
+abline(h = 0, v = 0)
+# dev.off()
+# plot(food.fa.promax$loadings[,1], 
+#      food.fa.promax$loadings[,2],
+#      xlab = "Factor 1", 
+#      ylab = "Factor 2",
+#      ylim = c(-1,1),
+#      xlim = c(-1,1),
+#      main = "Promax rotation")
+# abline(h = 0, v = 0)
+```
+
