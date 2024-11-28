@@ -1,0 +1,131 @@
+---
+title: "Demographics"
+output: html_document
+date: "2023-01-13"
+runtime: shiny
+---
+
+```{r}
+# install.packages(c("flexdashboard","tidycensus","tidyverse","tigris","leaflet"))
+
+
+library(flexdashboard)
+library(tidycensus)
+library(tidyverse)
+# library(readxl)
+# library(DT)
+# library(shiny)
+# library(shinythemes)
+# #library(knitr)
+# library(htmlwidgets)
+# library(leaflet)
+# library(sf)
+# library(sp)
+# Example: get ZCTAs that intersect the Memphis, TN urbanized area
+library(tigris)
+# library(leaflet)
+
+# census_api_key("18228aa476241b220723d976eec8345ce1a798e1", overwrite = FALSE, install = TRUE)
+census_api_key("d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9", overwrite = FALSE)
+
+# Extract Census Tracts by State Fips Code
+# ok_blocks <- tracts("CO", cb = TRUE)
+
+# Extract Blocks by State Fips Code - NOTE:  THIS REQUIRES A LOT OF RAM!!!!
+tx_blocks <- blocks(state = "tx", county = c("Archer"))
+
+# zcta1 <- zctas(cb = TRUE, starts_with = c("80"))
+# census_api_key("18228aa476241b220723d976eec8345ce1a798e1", overwrite = FALSE, install = TRUE)
+# census_api_key("d2f0fe8f1e5a7984a67bbff53c703bc9c6ea9da9", overwrite = FALSE)
+
+# acs_variables <- load_variables(2021, "acs5")
+# write_csv(acs_variables, "acs_variable.csv")
+
+median_inc <- get_acs(state = "CO", geography = "tract",
+        variables = c("B19019_001"),
+        year = 2021)
+
+median_age <- get_acs(state = "CO", geography = "tract",
+        variables = c("B06002_001"),
+        year = 2021)
+
+write_csv(median_age, "median_age.csv")
+
+households <- get_acs(state = "CO", geography = "tract",
+        variables = c("B11011_001"),
+        year = 2021)
+
+
+join1 <- inner_join(median_inc,median_age, by = "GEOID")
+
+pop_under18 <- get_acs(state = "CO", geography = "tract",
+        variables = c(pop_under18 = "B09001_001"),
+        year = 2021)
+
+join2 <- inner_join(join1,pop_under18, by = "GEOID")
+
+median_hhi_quintile <- get_acs(state = "CO", geography = "tract",
+        variables = c(median_hhi_quintile = "B19081_001"),
+        year = 2021)
+
+
+join2
+
+
+
+
+
+# housing18 <- get_acs(geography = "tract",
+#         variables = c(housing = "B25001_001"),
+#         year = 2021)
+# 
+# median_inc18 <- get_acs(geography = "tract",
+#         variables = c(income = "B19013_001"),
+#         year = 2021) 
+# 
+# join1 <- inner_join(housing18,median_inc18, by = "GEOID")
+# median_age18 <- get_acs(geography = "tract",
+#         variables = c(age = "B06002_001"),
+#         year = 2021)
+# 
+# join2 <- inner_join(join1,median_age18, by = "GEOID")
+# hh_size18 <- get_acs(geography = "tract",
+#         variables = c(hhsize = "B25010_001"),
+#         year = 2021)
+# 
+# join2
+```
+```{r}
+
+jackson_cnty <- zctas(cb=TRUE, state = "OR", county = "Jackson")
+
+leaflet(jackson_cnty) %>%
+addTiles() %>%
+addPolygons()
+```
+
+```{r}
+library(tigris)
+zcta1 <- zctas(cb = TRUE, starts_with = c("37", "38", "72"), class = "sf")
+
+uas <- urban_areas()
+
+memphis_ua <- uas[grep("Memphis", uas$NAME10), ]
+
+mem_zcta <- zcta1[memphis_ua, ]
+
+plot(mem_zcta$geometry)
+```
+
+```{r}
+zcta1 <- zctas(cb = TRUE, starts_with = c("37", "38", "72"))
+
+uas <- urban_areas()
+
+memphis_ua <- uas[grep("Memphis", uas$NAME10), ]
+
+mem_zcta <- zcta1[memphis_ua, ]
+
+plot(mem_zcta$geometry)
+```
+
