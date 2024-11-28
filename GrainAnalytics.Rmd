@@ -1,0 +1,277 @@
+---
+title: "Portfolio Dynamics Group"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: 
+      version: 4
+      bootswatch: materia
+    orientation: rows
+    vertical_layout: fill
+    logo: logo_2.PNG
+runtime: shiny
+resource_files:
+  - netflix_titles.xlsx
+  - logo_2.PNG
+  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(readxl)
+library(flexdashboard)
+library(crosstalk)
+library(remotes)
+library(plotly)
+library(lubridate)
+library(DT)
+library(htmlwidgets)
+library(shiny)
+```
+
+```{r, include=FALSE}
+
+movies <- readxl::read_xlsx('netflix_titles.xlsx')
+
+df <- movies %>%
+  mutate(date_added = as.Date(date_added)) %>%
+  # mutate(release_year = ymd(release_year, truncated = 2L)) %>%
+  filter(!is.na(date_added)) %>%
+  filter(!is.na(duration)) %>%
+  mutate(category =
+           case_when(
+             str_detect(listed_in, "Action & Adventure") ~ "Action and Adventure",
+             str_detect(listed_in, "Anime Features") ~ "Anime",
+             str_detect(listed_in, "British TV Shows") ~ "British TV Shows",
+             str_detect(listed_in, "Children & Family") ~ "Children and Family",
+             str_detect(listed_in, "Classic") ~ "Classic",
+             str_detect(listed_in, "Comedies") ~ "Comedies",
+             str_detect(listed_in, "Crime TV Shows") ~ "Crime TV Shows",
+             str_detect(listed_in, "Cult Movies") ~ "Cult Movies",
+             str_detect(listed_in, "Documentaries") ~ "Documentaries",
+             str_detect(listed_in, "Docuseries") ~ "Docuseries",
+             str_detect(listed_in, "Dramas") ~ "Dramas",
+             str_detect(listed_in, "Horror") ~ "Horror",
+             str_detect(listed_in, "Independent") ~ "Independent",
+             str_detect(listed_in, "International") ~ "International",
+             str_detect(listed_in, "Kids' TV") ~ "Kids' TV",
+             str_detect(listed_in, "Music & Musicals") ~ "Music and Musicals",
+             str_detect(listed_in, "Reality TV") ~ "Reality TV",
+             str_detect(listed_in, "Romantic") ~ "Romantic",
+             str_detect(listed_in, "Sci-Fi") ~ "Sci-Fi",
+             str_detect(listed_in, "Stand-Up Comedy") ~ "Stand-Up Comedy",
+             str_detect(listed_in, "Thrillers") ~ "Thrillers",
+             str_detect(listed_in, "TV Action & Adventure") ~ "TV Action and Adventure",
+             str_detect(listed_in, "TV Comedies") ~ "TV Comedies",
+             str_detect(listed_in, "TV Dramas") ~ "TV Dramas",
+             TRUE ~ "Other"
+           ))
+             
+sd <- SharedData$new(df)
+
+theme_set(theme_light())
+
+mycolors <- c("blue", "#FFC125", "darkgreen", "darkorange")
+```
+
+Netflix Movies and TV Shows {data-icon="fa-film"}
+==================================================
+
+Sidebar {.sidebar}
+--------------------------------------------------
+
+```{r}
+# Create placeholder for the downloadButton
+uiOutput("downloadUI")
+```
+
+```{r}
+# # Create the actual downloadButton
+output$downloadUI <- renderUI( {
+  # downloadButton("downBtn", "Download Data", style = "width:100%;")
+  downloadButton("downBtn", "Download Data", style = "width:100%")
+})
+# Add download handling
+output$downBtn <- downloadHandler(
+  filename = function() {
+    "netflix_titles.csv"
+  },
+  content = function(file) {
+    write.csv(df, file, row.names = FALSE)
+  }
+)
+```
+
+### <font size="5">**Inputs**</font>
+
+```{r}
+filter_select("type", "Select Type: ", sd, ~type)
+filter_select("category", "Select Category: ", sd, ~category)
+
+```
+
+About this Dataset: Netflix is one of the most popular media and video streaming platforms. They have over 8000 movies or tv shows available on their platform, as of mid-2021, they have over 200M Subscribers globally. This tabular dataset consists of listings of all the movies and tv shows available on Netflix, along with details such as - cast, directors, ratings, release year, duration, etc.
+
+
+Row {data-height=100}
+--------------------------------------------------
+
+### <font size="3">**Movie Titles**</font>
+
+```{r}
+renderValueBox({
+
+  shows <- sd$data(withSelection = TRUE, withFilter = TRUE) %>%
+    filter(type %in% c("Movie")) %>%
+    summarise(shows_n = n_distinct(show_id))
+
+  # shows_cnt <- round(sum(ifelse(shows$shows_n==0, 0, shows$show_n)))
+
+  valueBox(value = scales::number(shows$shows_n, big.mark = ","), icon = "fa-file-video",  color = "primary")
+})
+```
+
+
+### <font size="3">**TV Show Titles**</font>
+
+```{r}
+renderValueBox({
+
+  shows <- sd$data(withSelection = TRUE, withFilter = TRUE) %>%
+    filter(type %in% c("TV Show")) %>%
+    summarise(shows_n = n_distinct(show_id))
+
+  # shows_cnt <- round(sum(ifelse(shows$shows_n==0, 0, shows$show_n)))
+
+  valueBox(value = scales::number(shows$shows_n, big.mark = ","), icon = "fa-tv",  color = "primary")
+})
+```
+
+Row {data-height=250}
+--------------------------------------------------
+
+### <font size="5">**Movie Titles by Type**</font>
+
+```{r}
+renderPlotly({
+  
+  show_cnt <- sd$data(withSelection = TRUE, withFilter = TRUE) %>%
+    group_by(type) %>%
+    summarise(show_cnt = length(unique(show_id))) %>%
+    arrange(desc(show_cnt))
+  
+  p1 <- show_cnt %>%
+    plot_ly(labels = ~type,
+            values = ~show_cnt,
+            marker = list(colors = mycolors)) %>%
+    add_pie(hole = 0.4) %>%
+    layout(xaxis = list(zeroline = F,
+                      showline = F,
+                      showticklabels = F,
+                      showgrid = F),
+         yaxis = list(zeroline = F,
+                      showline = F,
+                      showticklabels = F,
+                      showgrid = F))
+  ggplotly(p1)
+})
+```
+
+### <font size="5">**Movie Titles by Rating**</font>
+```{r}
+renderPlotly({
+  
+  rating_cnt <- sd$data(withSelection = TRUE, withFilter = TRUE) %>%
+    group_by(rating) %>%
+    summarise(rating_nbr = length(unique(show_id))) %>%
+    arrange(desc(rating_nbr)) 
+  
+  p2 <- rating_cnt %>%
+    plot_ly(labels = ~rating,
+            values = ~rating_nbr,
+            marker = list(colors = mycolors)) %>%
+    add_pie(hole = 0.4) %>%
+    layout(xaxis = list(zeroline = F,
+                      showline = F,
+                      showticklabels = F,
+                      showgrid = F),
+         yaxis = list(zeroline = F,
+                      showline = F,
+                      showticklabels = F,
+                      showgrid = F))
+  ggplotly(p2)
+})
+```
+
+### <font size="5">**Movie Titles by Year**</font>
+```{r}
+renderPlotly({
+  
+  p3 <- sd$data(withSelection = TRUE, withFilter = TRUE) %>%
+    group_by(release_year) %>%
+    summarize(movie_nbr = length(unique(show_id))) %>%
+    arrange(release_year) %>%
+    ggplot(aes(release_year, movie_nbr, group = 1, 
+               text = paste("Release Year: ", release_year, 
+                            "<br>Titles: ", scales::comma(movie_nbr))
+               )) +
+    geom_point() +
+    geom_line(size=1, alpha = 0.5) +
+    geom_area(alpha = 0.2) +
+    expand_limits(y=0) +
+    labs( 
+            y = "Titles",
+            x = "Release Year") +
+    theme(strip.background = element_rect(fill = "blue"), 
+          strip.text = element_text(size = 12, face = "bold"),
+          legend.position = "none",
+          plot.title.position = "plot") 
+  # +
+  #   scale_x_date(labels = scales::date_format("%Y"))
+  
+  ggplotly(p3, tooltip = "text")
+})
+```
+
+Key Statistics {data-icon="fa-filter"}
+==================================================
+
+Row
+--------------------------------------------------
+
+### <font size="5">**Details**</font>
+
+```{r}
+renderDataTable({
+    
+  DT::datatable(sd$data(withSelection = TRUE, withFilter = TRUE)[, -c(1,7,10:12,14)],
+          # caption = "REVIEWS",
+          rownames = FALSE,
+          colnames = c(
+            "Type" = "type",
+            "Title" = "title",
+            "Director" = "director",
+            "Cast" = "cast",
+            "Country" = "country",
+            "Release Year" = "release_year",
+            "Rating" = "rating",
+            "Category" = "category"
+          ),
+          filter = list(position = "top"),
+          options = list(
+            # dom = 'Bfrtip',
+            scrollX = TRUE,
+            scrollCollapse = FALSE,
+            search = list(caseInsensitive = TRUE),
+            # dom="t",
+            # pageLength=100,
+            scrollY = '800px',
+            pageLength = 25
+            # ,
+            # autoWidth=TRUE
+            )
+          )
+})
+```
+
