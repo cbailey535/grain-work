@@ -1,0 +1,1189 @@
+---
+title: "Portfolio Sentiment Tracker"
+output: 
+  flexdashboard::flex_dashboard:
+    theme: cosmo
+    orientation: rows
+    vertical_layout: fill
+    logo: https://graingp.com/wp-content/uploads/2021/05/logo.svg
+runtime: shiny
+resource_files:
+  - Sentiment.csv
+  - afinn_111.xlsx
+---
+
+
+```{r libraries}
+library(rtweet)
+library(tidyverse)
+library(flexdashboard)
+library(shiny)
+library(shinythemes)
+library(openintro)
+library(knitr)
+library(scales)
+library(tidytext) 
+library(broom)
+library(purrr)
+library(textdata)
+library(plotly)
+library(wordcloud)
+library(RColorBrewer)
+library(reshape2)
+library(ggraph)
+library(igraph)
+library(ggrepel)
+library(grid)
+library(crosstalk)
+library(htmlwidgets)
+library(htmltools)
+library(DT)
+library(tm)
+library(widyr)
+# library(stm)
+library(tidyr)
+
+theme_set(theme_light())
+
+mycolors <- c("blue", "#FFC125", "darkgreen", "darkorange")
+```
+
+```{r gather_tweets}
+token <- create_token(
+  app = 'marketingguy_text_mining',
+  consumer_key = 'ReFDEfRS2s2jNbVIsNtU8rhEA',
+  consumer_secret = 'nWWIPUlFAPQxeK688pw45pu541BJVHmZLa1mU0haBZV2zIUqqo',
+  access_token = '18102142-on6G71rQMJm7wr4MoiW83jko8s5nFB7iuZGoZxupZ',
+  access_secret = '84Z3Ab3uP7nQSdMn52tJXC64JZZG8mxD9ViBG4jsjnFjY')
+# search_date <- Sys.Date()-20
+
+hunter_tweets <- search_tweets2(
+                        c("hunterfiber",
+                        "\"Hunter Communications\"",
+                        "\"Hunter Fiber\"",
+                        "\"Hunter Fiber Internet\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        lang = "en"
+                        )
+hunter_tweets$created_at <- format(hunter_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+hunter_tweets$region <- "Oregon"
+hunter_tweets$brand<- "Hunter"
+hunter_tweets$src <- "Twitter"
+hunter_tweets <- hunter_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Hunter") ~ "Hunter",
+             str_detect(text,"hunterfiber") ~ "Hunter",
+             str_detect(text,"Hunter Communications") ~ "Hunter",
+             str_detect(text,"Hunter Fiber Internet") ~ "Hunter",
+             str_detect(text,"Hunter Internet") ~ "Hunter",
+             str_detect(text,"hunter") ~ "Hunter",
+             TRUE ~ "Other")) %>%
+  filter(!brand %in% "Other")
+
+clink_or_tweets <- search_tweets2(
+                        c("CenturyLinkHome",
+                        "\"Century Link\"",
+                        "\"Centurylink\"",
+                        "\"CenturyLink\""
+                        ),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "44,-120.5,500mi",
+                        lang = "en"
+                        )
+clink_or_tweets$created_at <- format(clink_or_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+clink_or_tweets$region <- "Oregon"
+clink_or_tweets$brand<- "CenturyLink"
+clink_or_tweets$src <- "Twitter"
+clink_or_tweets <- clink_or_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             str_detect(text,"Century Link") ~ "CenturyLink",
+             str_detect(text,"Centurylink") ~ "CenturyLink",
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+ziply_tweets <- search_tweets2(
+                        c("ZiplyFiber",
+                        "\"Ziply Fiber\"",
+                        "\"Ziply\""
+                        ),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "44,-120.5,500mi",
+                        lang = "en"
+                        )
+ziply_tweets$created_at <- format(ziply_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+ziply_tweets$region <- "Oregon"
+ziply_tweets$brand<- "Ziply"
+ziply_tweets$src <- "Twitter"
+ziply_tweets <- ziply_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Ziply") ~ "Ziply",
+             str_detect(text,"ZiplyFiber") ~ "Ziply",
+             str_detect(text,"Ziply Fiber") ~ "Ziply",
+             TRUE ~ "Other"
+                     )) 
+
+xfinity_or_tweets <- search_tweets2(
+                        c("Xfinity OR 
+                        xfinitysupport OR
+                        Comcast"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "44,-120.5,500mi",
+                        lang = "en"
+                        )
+xfinity_or_tweets$created_at <- format(xfinity_or_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+xfinity_or_tweets$region <- "Oregon"
+xfinity_or_tweets$brand<- "Xfinity"
+xfinity_or_tweets$src <- "Twitter"
+xfinity_or_tweets <- xfinity_or_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Xfinity") ~ "Xfinity",
+             str_detect(text,"Comcast") ~ "Xfinity",
+             str_detect(text,"xfinity") ~ "Xfinity",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+astound_tweets <- search_tweets2(
+                        c("WaveConnects OR
+                        Astound",
+                        "\"Astound Broadband\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "44,-120.5,500mi",
+                        lang = "en"
+                        )
+astound_tweets$created_at <- format(astound_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+astound_tweets$region <- "Oregon"
+astound_tweets$brand<- "Astound"
+astound_tweets$src <- "Twitter"
+astound_tweets <- astound_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"WaveConnects") ~ "Astound",
+             str_detect(text,"Astound") ~ "Astound",
+             str_detect(text,"Wave") ~ "Astound",
+             str_detect(text,"Astound Broadband") ~ "Astound",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+alyrica_tweets <- search_tweets2(
+                        c("AlyricaNetworks OR
+                          Alyrica"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        lang = "en"
+                        )
+alyrica_tweets$created_at <- format(alyrica_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+alyrica_tweets$region <- "Oregon"
+alyrica_tweets$brand<- "Alyrica"
+alyrica_tweets$src <- "Twitter"
+alyrica_tweets <- alyrica_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Alyrica") ~ "Alyrica",
+              str_detect(text,"AlyricaNetworks") ~ "Alyrica",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+summit_tweets <- search_tweets2(
+                        c("SummitBroadband",
+                          "\"Summit Broadband\"",
+                          "\"Summit Fiber\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        lang = "en"
+                        )
+summit_tweets$created_at <- format(summit_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+summit_tweets$region <- "Florida"
+summit_tweets$brand<- "Summit"
+summit_tweets$src <- "Twitter"
+summit_tweets <- summit_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"SummitBroadband") ~ "Summit",
+             str_detect(text,"Summit Broadband") ~ "Summit",
+             str_detect(text,"Summit Fiber") ~ "Summit",
+             str_detect(text,"Summit") ~ "Summit",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+spectrum_fl_tweets <- search_tweets2(
+                        c("GetSpectrum", 
+                        "\"ask_spectrum\"",
+                        "\"Spectrum\"",
+                        "\"Charter Communications\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "26.177624,-81.806946,500mi",
+                        lang = "en"
+                        )
+spectrum_fl_tweets$created_at <- format(spectrum_fl_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+spectrum_fl_tweets$region <- "Florida"
+spectrum_fl_tweets$brand<- "Spectrum"
+spectrum_fl_tweets$src <- "Twitter"
+spectrum_fl_tweets <- spectrum_fl_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"GetSpectrum") ~ "Spectrum",
+             str_detect(text,"ask_spectrum") ~ "Spectrum",
+             str_detect(text,"Spectrum") ~ "Spectrum",
+             str_detect(text,"Charter") ~ "Spectrum",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+clink_fl_tweets <- search_tweets2(
+                        c("CenturyLinkHome",
+                        "\"Century Link\"",
+                        "\"Centurylink\"",
+                        "\"CenturyLink\""
+                        ),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "26.177624,-81.806946,500mi",
+                        lang = "en"
+                        )
+clink_fl_tweets$created_at <- format(clink_fl_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+clink_fl_tweets$region <- "Florida"
+clink_fl_tweets$brand<- "CenturyLink"
+clink_fl_tweets$src <- "Twitter"
+clink_fl_tweets <- clink_fl_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             str_detect(text,"Century Link") ~ "CenturyLink",
+             str_detect(text,"Centurylink") ~ "CenturyLink",
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+xfinity_fl_tweets <- search_tweets2(
+                        c("Xfinity OR 
+                        xfinitysupport OR
+                        Comcast"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "26.177624,-81.806946,500mi",
+                        lang = "en"
+                        )
+xfinity_fl_tweets$created_at <- format(xfinity_fl_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+xfinity_fl_tweets$region <- "Florida"
+xfinity_fl_tweets$brand<- "Xfinity"
+xfinity_fl_tweets$src <- "Twitter"
+xfinity_fl_tweets <- xfinity_fl_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Xfinity") ~ "Xfinity",
+             str_detect(text,"Comcast") ~ "Xfinity",
+             str_detect(text,"xfinity") ~ "Xfinity",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+ritter_tweets <- search_tweets2(
+                        c("RitterComm", 
+                          "\"Ritter Communications\"",
+                          "\"Ritter Fiber\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        lang = "en"
+                        )
+ritter_tweets$created_at <- format(ritter_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+ritter_tweets$region <- "Arkansas"
+ritter_tweets$brand<- "Ritter"
+ritter_tweets$src <- "Twitter"
+ritter_tweets <- ritter_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"RitterComm") ~ "Ritter",
+             str_detect(text,"Ritter Communications") ~ "Ritter",
+             str_detect(text,"Ritter Fiber") ~ "Ritter",
+             str_detect(text,"Ritter") ~ "Ritter",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+gp_tweets <- search_tweets2(
+                        c("GPC_updates OR greatplainscomm",
+                          "\"Great Plains Communications\"",
+                          "\"Great Plains Internet\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        lang = "en"
+                        )
+gp_tweets$created_at <- format(gp_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+gp_tweets$region <- "Nebraska"
+gp_tweets$brand<- "GreatPlains"
+gp_tweets$src <- "Twitter"
+gp_tweets <- gp_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"GPC_updates") ~ "GreatPlains",
+             str_detect(text,"Great Plains") ~ "GreatPlains",
+             str_detect(text,"greatplainscomm") ~ "GreatPlains",
+             str_detect(text,"Great Plains Communications") ~ "GreatPlains",
+             str_detect(text,"Great Plains Internet") ~ "GreatPlains",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+clink_ne_tweets <- search_tweets2(
+                        c("CenturyLinkHome",
+                        "\"Century Link\"",
+                        "\"Centurylink\"",
+                        "\"CenturyLink\""
+                        ),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "41.5,-100.0,500mi",
+                        lang = "en"
+                        )
+clink_ne_tweets$created_at <- format(clink_ne_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+clink_ne_tweets$region <- "Nebraska"
+clink_ne_tweets$brand<- "CenturyLink"
+clink_ne_tweets$src <- "Twitter"
+clink_ne_tweets <- clink_ne_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             str_detect(text,"Century Link") ~ "CenturyLink",
+             str_detect(text,"Centurylink") ~ "CenturyLink",
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+vyve_tweets <- search_tweets2(
+                        c("VyveBroadband OR Vyve"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "41.5,-100.0,500mi",
+                        lang = "en"
+                        )
+vyve_tweets$created_at <- format(vyve_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+vyve_tweets$region <- "Nebraska"
+vyve_tweets$brand<- "Vyve"
+vyve_tweets$src <- "Twitter"
+vyve_tweets <- vyve_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Vyve") ~ "Vyve",
+             str_detect(text,"VyveBroadband") ~ "Vyve",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+spectrum_ne_tweets <- search_tweets2(
+                        c("GetSpectrum", 
+                        "\"ask_spectrum\"",
+                        "\"Spectrum\"",
+                        "\"Charter Communications\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "41.5,-100.0,500mi",
+                        lang = "en"
+                        )
+spectrum_ne_tweets$created_at <- format(spectrum_ne_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+spectrum_ne_tweets$region <- "Nebraska"
+spectrum_ne_tweets$brand<- "Spectrum"
+spectrum_ne_tweets$src <- "Twitter"
+spectrum_ne_tweets <- spectrum_ne_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"GetSpectrum") ~ "Spectrum",
+             str_detect(text,"ask_spectrum") ~ "Spectrum",
+             str_detect(text,"Spectrum") ~ "Spectrum",
+             str_detect(text,"Charter") ~ "Spectrum",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+santarosa_tweets <- search_tweets2(
+                        c("santarosacomm OR santarosafiber",
+                          "\"santa rosa communications\"",
+                          "\"santa rosa fiber\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        # geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+santarosa_tweets$created_at <- format(santarosa_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+santarosa_tweets$region <- "Texas"
+santarosa_tweets$brand<- "Santa Rosa Comm"
+santarosa_tweets$src <- "Twitter"
+santarosa_tweets <- santarosa_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"santarosacomm") ~ "Santa Rosa Comm",
+             str_detect(text,"@santarosacomm") ~ "Santa Rosa Comm",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+spectrum_tx_tweets <- search_tweets2(
+                        c("GetSpectrum", 
+                        "\"ask_spectrum\"",
+                        "\"Spectrum\"",
+                        "\"Charter Communications\""),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+spectrum_tx_tweets$created_at <- format(spectrum_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+spectrum_tx_tweets$region <- "Texas"
+spectrum_tx_tweets$brand<- "Spectrum"
+spectrum_tx_tweets$src <- "Twitter"
+spectrum_tx_tweets <- spectrum_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"GetSpectrum") ~ "Spectrum",
+             str_detect(text,"ask_spectrum") ~ "Spectrum",
+             str_detect(text,"Spectrum") ~ "Spectrum",
+             str_detect(text,"Charter") ~ "Spectrum",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+clink_tx_tweets <- search_tweets2(
+                        c("CenturyLinkHome",
+                        "\"Century Link\"",
+                        "\"Centurylink\"",
+                        "\"CenturyLink\""
+                        ),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+clink_tx_tweets$created_at <- format(clink_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+clink_tx_tweets$region <- "Texas"
+clink_tx_tweets$brand<- "CenturyLink"
+clink_tx_tweets$src <- "Twitter"
+clink_tx_tweets <- clink_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             str_detect(text,"Century Link") ~ "CenturyLink",
+             str_detect(text,"Centurylink") ~ "CenturyLink",
+             str_detect(text,"CenturyLink") ~ "CenturyLink",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+xfinity_tx_tweets <- search_tweets2(
+                        c("Xfinity OR 
+                        xfinitysupport OR
+                        Comcast"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+xfinity_tx_tweets$created_at <- format(xfinity_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+xfinity_tx_tweets$region <- "Texas"
+xfinity_tx_tweets$brand<- "Xfinity"
+xfinity_tx_tweets$src <- "Twitter"
+xfinity_tx_tweets <- xfinity_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"Xfinity") ~ "Xfinity",
+             str_detect(text,"Comcast") ~ "Xfinity",
+             str_detect(text,"xfinity") ~ "Xfinity",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+google_tx_tweets <- search_tweets2(
+                        c("googlefiber OR 
+                        webpass"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+google_tx_tweets$created_at <- format(google_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+google_tx_tweets$region <- "Texas"
+google_tx_tweets$brand<- "Google Fiber"
+google_tx_tweets$src <- "Twitter"
+google_tx_tweets <- google_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"googlefiber") ~ "Google Fiber",
+             str_detect(text,"webpass") ~ "Google Fiber",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+windstream_tx_tweets <- search_tweets2(
+                        c("GoKineticHome OR 
+                        Windstream"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+windstream_tx_tweets$created_at <- format(windstream_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+windstream_tx_tweets$region <- "Texas"
+windstream_tx_tweets$brand<- "Windstream"
+windstream_tx_tweets$src <- "Twitter"
+windstream_tx_tweets <- windstream_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"GoKineticHome") ~ "Windstream",
+             str_detect(text,"Windstream") ~ "Windstream",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+sparklight_tx_tweets <- search_tweets2(
+                        c("sparklightcares OR 
+                        CableOne"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+sparklight_tx_tweets$created_at <- format(sparklight_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+sparklight_tx_tweets$region <- "Texas"
+sparklight_tx_tweets$brand<- "Sparklight"
+sparklight_tx_tweets$src <- "Twitter"
+sparklight_tx_tweets <- sparklight_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"sparklightcares") ~ "Sparklight",
+             str_detect(text,"CableOne") ~ "Sparklight",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+suddenlink_tx_tweets <- search_tweets2(
+                        c("optimum OR 
+                        Suddenlink"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+suddenlink_tx_tweets$created_at <- format(suddenlink_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+suddenlink_tx_tweets$region <- "Texas"
+suddenlink_tx_tweets$brand<- "Suddenlink"
+suddenlink_tx_tweets$src <- "Twitter"
+suddenlink_tx_tweets <- suddenlink_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"optimum") ~ "Suddenlink",
+             str_detect(text,"Suddenlink") ~ "Suddenlink",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+att_tx_tweets <- search_tweets2(
+                        c("ATT OR AT&T"),
+                        n = 500,
+                        include_rts = FALSE, 
+                        retryonratelimit = TRUE,
+                        geocode = "31.169621,-99.683617,500mi",
+                        lang = "en"
+                        )
+att_tx_tweets$created_at <- format(att_tx_tweets$created_at, format= "%Y-%m-%dT%H:%M:%S.000")
+att_tx_tweets$region <- "Texas"
+att_tx_tweets$brand<- "ATT"
+att_tx_tweets$src <- "Twitter"
+att_tx_tweets <- att_tx_tweets %>%
+  mutate(brand =
+           case_when(
+             str_detect(text,"ATT") ~ "ATT",
+             str_detect(text,"AT&T") ~ "ATT",
+             TRUE ~ "Other"
+                     ))  %>%
+  filter(!brand %in% "Other")
+
+portco_tweets <- do.call("rbind", list(
+                                    hunter_tweets,
+                                    clink_or_tweets,
+                                    ziply_tweets,
+                                    xfinity_or_tweets,
+                                    astound_tweets,
+                                    alyrica_tweets,
+                                    summit_tweets,
+                                    spectrum_fl_tweets,
+                                    clink_fl_tweets,
+                                    xfinity_fl_tweets,
+                                    ritter_tweets,
+                                    gp_tweets,
+                                    clink_ne_tweets,
+                                    vyve_tweets,
+                                    spectrum_ne_tweets,
+                                    santarosa_tweets,
+                                    spectrum_tx_tweets,
+                                    clink_tx_tweets,
+                                    xfinity_tx_tweets,
+                                    google_tx_tweets,
+                                    windstream_tx_tweets,
+                                    sparklight_tx_tweets,
+                                    suddenlink_tx_tweets,
+                                    att_tx_tweets
+                                    ))
+
+portco_tweets <- as.data.frame(portco_tweets)
+portco_tweets <- portco_tweets %>% mutate(duplicate = duplicated(text)) %>% filter(duplicate == "FALSE")
+
+# readr::write_csv(portco_tweets, "Sentiment.csv")
+```
+
+```{r processing}
+afinn <- readxl::read_xlsx('afinn_111.xlsx')
+
+portco_tweets <- portco_tweets %>% mutate(date = as.Date(created_at))
+
+portco_tweets <- portco_tweets %>% select(date,id_str,text,full_text,src,brand,region)
+# write_as_csv(bay_area, "C:\\Users\\chbailey\\Documents\\sent_app\\bay_area.csv", prepend_ids = TRUE, na = "", fileEncoding = "UTF-8")
+
+portco_tweets_copy <- portco_tweets 
+
+portco_tweets_copy$full_text <-  gsub("https\\S*", "", portco_tweets_copy$full_text)
+portco_tweets_copy$full_text <-  gsub("@\\S*", "", portco_tweets_copy$full_text)
+portco_tweets_copy$full_text <-  gsub("amp", "", portco_tweets_copy$full_text)
+portco_tweets_copy$full_text <-  gsub("[\r\n]", "", portco_tweets_copy$full_text)
+portco_tweets_copy$full_text <-  gsub("[[:punct:]]", "", portco_tweets_copy$full_text)
+replace_reg1 <- "https://t.co/[A-Za-z\\d]+|" 
+replace_reg2 <- "http://[A-Za-z\\d]+|&amp;|&lt;|&gt;|RT|https+|" 
+replace_reg <- paste0(replace_reg1, replace_reg2) 
+unnest_reg <- "([^A-Za-z_\\d#@']|'(?![A-Za-z_\\d#@]))"
+remove_words <- c("autism",
+                  "charter",
+                  "hunter",
+                  "ritter",
+                  "summit",
+                  "spectrum",
+                  "comcast",
+                  "xfinity",
+                  "centurylink",
+                  "century link",
+                  "ziply",
+                  "vyve",
+                  "sparklight",
+                  "att",
+                  "at&t",
+                  "google",
+                  "suddenlink",
+                  "alyrica"
+                  )
+tidy_tweets <- portco_tweets_copy %>%
+  # filter(!str_detect(text, "^RT")) %>%
+  mutate(text = str_replace_all(full_text, replace_reg, "")) %>% 
+  # unnest_tokens(word, text, token = "tweets", strip_punct =TRUE) %>%
+  unnest_tokens(word, full_text, token = "regex", pattern = unnest_reg) %>%
+  filter(
+         !word %in% stop_words$word,
+         !word %in% str_remove_all(stop_words$word, "'"),
+         !word %in% remove_words,
+         str_detect(word, "[a-z]"))
+
+tidy_tweets_copy <- tidy_tweets 
+
+tweet_sentiment <- tidy_tweets_copy %>%
+  # filter(id_str %in% ("1653400419220230145")) %>%
+    # unnest_tokens(word, TweetText, token = "tweets") %>%
+    inner_join(afinn, by = "word") %>%
+  mutate(polarity = ifelse(value>0,"Positive", ifelse(value<0, "Negative", "Neutral")))
+
+sentiment_scores <- portco_tweets_copy %>%
+  # filter(id_str %in% ("1653400419220230145")) %>%
+    left_join(tweet_sentiment %>%
+                  group_by(id_str) %>%
+                  summarise(score = sum(value))) %>%
+    replace_na(list(score = 0)) %>%
+   ungroup() %>%
+  # filter(words>= 4) %>%
+  # mutate(polarity = ifelse(sentiment>=6,"Very Positive",ifelse(sentiment>=4 & sentiment<6, "Positive", ifelse(sentiment<=(-1) & sentiment>=(-3), "Negative", ifelse(sentiment<(-3),"Very Negative","Neutral"))))) 
+  mutate(polarity = ifelse(score>0,"Positive", ifelse(score<0, "Negative", "Neutral")))
+
+sd_sent_scores <- SharedData$new(sentiment_scores)
+sd_sent_scores_2 <- SharedData$new(sentiment_scores)
+
+sd_tidy_tweets <- SharedData$new(tidy_tweets_copy)
+
+```
+
+Sentiment By Brand {data-icon="fa-smile-beam"}
+==================================================
+
+Inputs {.sidebar}
+--------------------------------------------------
+
+### <font size="5">**Filters**</font>
+
+```{r}
+filter_select(
+  id = "company",
+  label = "Select Company:",
+  sharedData = sd_sent_scores,
+  group = ~brand
+  )
+
+filter_select(
+  id = "region",
+  label = "Select Region:",
+  sharedData = sd_sent_scores,
+  group = ~region
+  )
+
+```
+
+**Note: Small sample sizes (generally <30 reviews) will result in biased results.**
+
+Row
+--------------------------------------------------
+
+### <font size="5">**Daily Count of Reviews by Company**</font>
+
+```{r}
+renderPlot({
+  
+  tweets_by_brand <- sd_sent_scores$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+    group_by(brand,date) %>%
+    summarise(reviews = n()) %>%
+    arrange(brand,date)
+  
+  ggplot(tweets_by_brand, aes(x = date, y = reviews)) +
+    geom_col(aes(x = date, y = reviews, fill = brand), alpha = .8) +
+    facet_wrap(~brand) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12, angle = 90),
+        axis.title = element_text(size = 16),
+        axis.title.y=element_blank(),
+        axis.text.y=element_text(size = 12),
+        strip.background = element_rect(fill = "blue"),
+        strip.text = element_text(size = 12, color = "white")
+        ) +
+    scale_x_date() +
+    labs(y = "Reviews", x = "")
+
+})
+```
+
+### <font size="5">**Sentiment by Brand**</font>
+
+```{r}
+renderPlot({
+  
+  # sentiment_by_brand <- sentiment_scores %>%
+  #   group_by(brand) %>%
+  #   summarise(sentiment = sum(score),
+  #             size = n()) %>%
+  #   ungroup()
+  
+  sentiment_by_brand <- sd_sent_scores$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+    group_by(brand) %>%
+    summarise(sentiment = sum(score),
+              size = n()) %>%
+    ungroup()
+  
+  group <- unique(sentiment_by_brand$brand)
+  
+  ggplot(sentiment_by_brand, aes(x = sentiment, y = brand, color = brand)) +
+    geom_point(size = 3, shape = 21, stroke = 3, fill = "white") +
+    # scale_size(name = "Reviews", range = c(3, 15)) +
+    # geom_text(label = group, nudge_x = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed") +
+    geom_text_repel(label = group, nudge_x = 0.3, nudge_y = 0.3, size = 10) +
+    theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(size = 12),
+        axis.title = element_text(size = 18),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank()) +
+    scale_x_continuous(limits = c(-50,50)) +
+    labs(x = "More Negative             Neutral               More Positive",
+       y = NULL)
+
+})
+```
+
+Reviews {data-icon="fa-smile-beam"}
+==================================================
+
+Inputs {.sidebar}
+--------------------------------------------------
+
+### <font size="5">**Filters**</font>
+
+```{r}
+filter_select(
+  id = "company",
+  label = "Select Company:",
+  sharedData = sd_sent_scores_2,
+  group = ~brand
+  )
+
+filter_select(
+  id = "region",
+  label = "Select Region:",
+  sharedData = sd_sent_scores_2,
+  group = ~region
+  )
+
+```
+
+**Note: Small sample sizes (generally <30 reviews) will result in biased results.**
+
+Row
+--------------------------------------------------
+
+### <font size="5">**Social Media Reviews and Sentiment Scores by Portfolio Company**</font>
+
+```{r}
+renderDataTable({
+
+  reviews <- sd_sent_scores_2$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) 
+  # %>%
+  #   filter(polarity != "Neutral") %>%
+  #   mutate(sentiment = ifelse(polarity == "Positive",
+  #                        as.character(icon("smile", lib = "font-awesome")),
+  #                        as.character(icon("frown", lib = "font-awesome"))))
+
+  datatable(reviews[,c(1,5:7,4,9)],
+          # caption = "REVIEWS",
+          rownames = FALSE,
+          colnames = c(
+            "DATE" = "date",
+            "SOURCE" = "src",
+            "BRAND" = "brand",
+            "MARKET" = "region",
+            "REVIEW" = "full_text",
+            "SENTIMENT" = "polarity"
+          ),
+          filter = "top",
+          options = list(
+            order = list(1, 'desc'),
+            pageLength=25,
+            scrollY = '800px',
+            pageLength = 1000,
+            autoWidth=FALSE)) %>% formatStyle(
+  'SENTIMENT',
+  backgroundColor = styleEqual(c('Negative','Neutral','Positive'), c('red', 'yellow', 'green')),
+  fontWeight = 'bold'
+)
+
+  # , escape = FALSE) 
+
+})
+```
+
+<!-- ### <font size="5">**Key Topics**</font> -->
+
+<!-- ```{r} -->
+<!-- renderPlot({ -->
+<!-- # https://warin.ca/shiny/stm/#section-references -->
+<!-- topic_df <- sd_sent_scores$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>% -->
+<!--   select(text,polarity) -->
+
+<!-- processed <- textProcessor(topic_df$text, -->
+<!--                            metadata = topic_df[2]) -->
+
+<!-- out <- prepDocuments(processed$documents, -->
+<!--                      processed$vocab, -->
+<!--                      processed$meta) -->
+
+<!-- docs <- out$documents -->
+<!-- vocab <- out$vocab -->
+<!-- meta <- out$meta -->
+
+<!-- First_STM <- stm(documents = out$documents,  -->
+<!--                  vocab = out$vocab, -->
+<!--                  prevalence = ~polarity, -->
+<!--                  K=4, -->
+<!--                  max.em.its = 50, -->
+<!--                  data = out$meta, -->
+<!--                  init.type = "Spectral", -->
+<!--                  verbose = FALSE) -->
+
+<!-- predict_topics <- estimateEffect(1:4 ~ polarity, stmobj = First_STM, metadata = out$meta, uncertainty = "Global") -->
+
+<!-- thought <- findThoughts(First_STM,  -->
+<!--              texts = topic_df$text, -->
+<!--              n = 2, -->
+<!--              topics = c(1:4)) -->
+
+<!-- thoughts1 <- findThoughts(First_STM, texts = topic_df$text, n = 1, topics = 1)$docs[[1]] -->
+<!-- thoughts2 <- findThoughts(First_STM, texts = topic_df$text, n = 1, topics = 2)$docs[[1]] -->
+<!-- thoughts3 <- findThoughts(First_STM, texts = topic_df$text, n = 1, topics = 3)$docs[[1]] -->
+<!-- thoughts4 <- findThoughts(First_STM, texts = topic_df$text, n = 1, topics = 4)$docs[[1]] -->
+<!-- par(mfrow = c(1, 4), mar = c(0.5, 0.5, 1, 0.5)) -->
+<!-- plotQuote(thoughts1, width = 20, text.cex = 3, main = "Conversation 1") -->
+<!-- plotQuote(thoughts2, width = 20, text.cex = 3, main = "Conversation 2") -->
+<!-- plotQuote(thoughts3, width = 20, text.cex = 3, main = "Conversation 3") -->
+<!-- plotQuote(thoughts4, width = 20, text.cex = 3, main = "Conversation 4") -->
+<!-- # plot(First_STM, cex.main=1.25, cex.lab=1.25, cex.axis=1) -->
+<!-- }) -->
+<!-- ``` -->
+
+Sentiment Driver Analysis {data-icon="fa fa-bar-chart"}
+==================================================
+
+Inputs {.sidebar}
+--------------------------------------------------
+
+### <font size="5">**Filters**</font>
+
+```{r}
+filter_select(
+  id = "company",
+  label = "Select Company:",
+  sharedData = sd_tidy_tweets,
+  group = ~brand
+  )
+
+filter_select(
+  id = "region",
+  label = "Select Region:",
+  sharedData = sd_tidy_tweets,
+  group = ~region
+  )
+
+```
+
+**Note: Small sample sizes (generally <30 reviews) will result in biased results.**
+
+Row
+--------------------------------------------------
+
+### <font size="5">**Sentiment Contribution by Key Word**</font>
+
+```{r}
+renderPlot({
+
+  words_by_portco <- sd_tidy_tweets$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+  count(brand, word, sort = TRUE) %>%
+  ungroup()
+
+  contributions <- words_by_portco %>%
+  inner_join(afinn, by = "word") %>%
+  group_by(brand,word) %>%
+  summarise(occurences = n(),
+            contribution = sum(value)) 
+
+  contributions %>%
+  slice_max(abs(contribution), n = 10) %>%
+  mutate(word = reorder(word, contribution)) %>%
+  ggplot(aes(contribution, word, fill = contribution > 0)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~brand, scales = "free") + 
+  theme(text = element_text(size=16),
+        axis.title.x=element_blank(),
+        strip.background = element_rect(fill = "blue"),
+        strip.text = element_text(size = 12, color = "white")) +
+  labs(x = "Sentiment Contribution", y = "")
+
+})
+```
+
+### <font size="5">**Common Word-to-Word Connections**</font>
+
+```{r}
+renderPlot({
+  
+  trigrams_filtered <- sd_tidy_tweets$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+    # filter(id_str %in% ("1653400419220230145")) %>%
+  unnest_tokens(trigram, text, token = "ngrams", n = 3) %>%
+  filter(!is.na(trigram)) %>%
+  separate(trigram, c("word1", "word2", "word3"), sep = " ") %>%
+  filter(!word1 %in% stop_words$word,
+         !word2 %in% stop_words$word,
+         !word3 %in% stop_words$word) %>%
+  count(word1, word2, word3, sort = TRUE)
+
+  trigrams_united <- trigrams_filtered %>%
+  unite(trigram, word1, word2, word3, sep = " ")
+
+# trigrams_united
+
+  trigram_graph <- trigrams_filtered %>%
+  filter(n >= 15) %>%
+  graph_from_data_frame()
+
+# trigram_graph
+
+  set.seed(2020)
+
+  a <- grid::arrow(type = "closed", length = unit(.15, "inches"))
+
+  ggraph(trigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = FALSE,
+                 arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), size = 5, vjust = 1, hjust = 1) +
+  theme_void()
+
+})
+```
+
+Row
+--------------------------------------------------
+
+### <font size="5">**Daily Sentiment Trend by Portfolio Company**</font>
+
+```{r}
+renderPlotly({
+  
+  sentiment_trend <-sd_tidy_tweets$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+  # mutate(week_year = as.Date(floor_date(emailed_dt, "week"))) %>%
+  # filter(brand %in% c("Wave","Xfinity","CenturyLink","ATT","Ziply")) %>%
+  inner_join(afinn, by = "word") %>%
+  group_by(brand,date) %>%
+  summarise(sentiment = mean(value),
+            words = n()) %>%
+  filter(words>=2) %>%
+  ungroup() %>%
+  mutate(
+    text = paste("Date: ", date, "\nBrand: ", brand, "\nSentiment: ", scales::number(sentiment, accuracy = 0.1), sep=""))
+  
+p2 <- sentiment_trend %>%
+  group_by(brand, date) %>%
+  arrange(brand, date) %>%
+  mutate(pos = sentiment<0,
+         sentiment = as.numeric(format(round(sentiment, 1), nsmall = 1))) %>%
+  ggplot(aes(date, sentiment, text=text,fill = pos)) +
+  geom_col(position = "identity") +
+  geom_smooth(method = "lm", se = FALSE) +
+  scale_fill_manual(values = c("#03fc0f", "#fc0703"), guide = "none") +
+ # geom_area(na.rm = TRUE, alpha = 0.3, outline.type = "both") +
+  # scale_colour_manual(name = 'Sentiment > 0', values = setNames(c('green','red'),c(T, F))) +
+  # geom_line(show.legend = FALSE) +
+  theme(legend.position = "none", 
+        text = element_text(size=12),
+        axis.text.x=element_text(angle=90, hjust=1),
+        legend.text = element_text(size=rel(1)),
+        legend.key.width = unit(1.5, "cm"),
+        axis.title.x=element_blank(),
+        strip.background = element_rect(fill = "blue"),
+        strip.text = element_text(size = 12)) +
+  scale_x_date(labels = function(x) format(x, "%b %d")) +
+  scale_y_continuous(limits = c(-5,5)) +
+  facet_wrap(~brand, scales = "fixed")
+
+ggplotly(p2, tooltip = c("text"), dynamicTicks = FALSE)
+
+})
+```
+
+### <font size="5">**Recently Trending Topics**</font>
+
+```{r}
+renderPlot({
+  
+  top_word <- sd_tidy_tweets$data(withSelection = FALSE, withFilter = TRUE, withKey = FALSE) %>%
+  count(word, date) %>%
+  bind_tf_idf(word, date, n) %>%
+  arrange(desc(tf_idf)) %>%
+  group_by(date) %>%
+  # top_n(1, tf_idf) %>%
+  distinct(date, .keep_all = TRUE) %>%
+  arrange(date)
+  
+  # shiny::validate(
+  #   shiny::need(nrow(top_word) != 0,
+  #        "Oh snap!  No results due to insufficient data.")
+  # )
+  
+  top_word %>%
+  ggplot(aes(date, n, label= word, color=word)) +
+  geom_line(color = "royalblue", size = 2) +
+  geom_point(color = "royalblue", size = 5) +
+  # geom_area(color = "blue", alpha=.2) +
+  # geom_text_repel(aes(label = word, color = word)) +
+  geom_label_repel(size = 8,
+                   box.padding = unit(0.5, "lines")) +
+  expand_limits(y = 0) +
+  labs(
+          title = "Represents the number of reviews that contain the key words shown in the graph.",
+          y = "Word count",
+          x = "") +
+  theme(legend.position = "none",
+        plot.title=element_text(size=18),
+        # axis.text=element_text(size=16),
+        axis.title=element_text(size=18),
+        axis.text.x = element_text(size = 12, angle = 90),
+        axis.text.y = element_text(size = 12)
+        ) +
+    scale_x_date(date_breaks = "1 day", date_labels =  "%b %d")
+})
+```
+
+<!-- Social Media Reviews {data-icon="fa-smile-beam"} -->
+<!-- ================================================== -->
+
+<!-- Row -->
+<!-- -------------------------------------------------- -->
+
+<!-- ### <font size="5">**Social Media Reviews and Sentiment Scores by Portfolio Company**</font> -->
+
+<!-- ```{r} -->
+<!-- renderDataTable({ -->
+
+<!--   reviews <- sentiment_scores -->
+
+<!--   DT::datatable(reviews[,c(1,5:7,4,9)], -->
+<!--           # caption = "REVIEWS", -->
+<!--           rownames = TRUE, -->
+<!--           colnames = c( -->
+<!--             "DATE" = "date", -->
+<!--             "SOURCE" = "src", -->
+<!--             "BRAND" = "brand", -->
+<!--             "MARKET" = "region", -->
+<!--             "REVIEW" = "full_text", -->
+<!--             "SENTIMENT" = "polarity" -->
+<!--           ), -->
+<!--           filter = "top", -->
+<!--           options = list( -->
+<!--             order = list(1, 'desc'), -->
+<!--             pageLength=25, -->
+<!--             scrollY = '800px', -->
+<!--             pageLength = 1000, -->
+<!--             autoWidth=FALSE)) -->
+
+<!-- }) -->
+<!-- ``` -->
