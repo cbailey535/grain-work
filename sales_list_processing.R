@@ -1,5 +1,5 @@
 ################################################################################
-# HOA LIST PROCESSING & CLUSTER ANALYSIS
+# HOA SALES LIST PROCESSING
 # Date:  December 2024
 # Developer:  Chris Bailey, Grain Management (cbailey@graingp.com)
 ################################################################################
@@ -23,9 +23,9 @@ library(sf)
 library(memoise)
 
 ################################################################################
-# STEP 1:  LOAD & TRANSFORM DATA
+# STEP 1:  LOAD & TRANSFORM SOURCE DATA
 ################################################################################
-  
+
 fl_hoa_src <- read.csv('HOA_BOARD_LIST_FLORIDA_DEC24_COPY.csv') %>%
   janitor::clean_names() %>% 
   mutate(src = "HOABL") %>%
@@ -105,12 +105,27 @@ fl_hoa_src <- read.csv('HOA_BOARD_LIST_FLORIDA_DEC24_COPY.csv') %>%
   ) %>%
   mutate(housing_unit_bin = 
            ifelse(total_units==0,"0 Housing Units",
-                  ifelse(total_units>=50 & total_units<=75,"50 to 75 Housing Units",
-                         ifelse(total_units>75 & total_units<=117,"76 to 117 Housing Units",
-                                ifelse(total_units>75 & total_units<=117,"76 to 117 Housing Units",
-                                       ifelse(total_units>117 & total_units<=215,"118 to 215 Housing Units","216+ Housing Units")))))
+            ifelse(total_units>=50 & total_units<=75,"50 to 75 Housing Units",
+              ifelse(total_units>75 & total_units<=117,"76 to 117 Housing Units",
+                ifelse(total_units>75 & total_units<=117,"76 to 117 Housing Units",
+                  ifelse(total_units>117 & total_units<=215,"118 to 215 Housing Units",
+                         "216+ Housing Units")))))
   ) %>%
   mutate(load_dt = as.Date("12-16-2024", format = "%m-%d-%Y"))
+
+competition_by_cbg <- read.csv('NAMED_COMPETITORS_BY_CBG_20241115.csv') %>%
+  janitor::clean_names() %>%
+  filter(provider_id == 130235 | provider_id == 130317) %>%
+  mutate(GEOID = as.character(census_block_grp),
+         spectrum = ifelse(provider_id == 130235,1,0),
+         comcast = ifelse(provider_id == 130317,1,0)) %>%
+  select(GEOID, spectrum, comcast) %>%
+  group_by(GEOID) %>%
+  summarize(
+    spectrum = max(spectrum),
+    comcast = max(comcast),
+    .groups = 'drop' # Ensures the result is ungrouped after summarization
+  )
   
 # Read the KML file once and simplify it for performance
 kml_file <- sf::read_sf('summit_network_jul24.kml') 
@@ -124,70 +139,74 @@ st_crs(kml_file) <- 4326
 ################################################################################
 # STEP 2:  FORWARD-GEOCODE THE PROPERTY ADDRESS TO OBTAIN THE GEOID
 ################################################################################
-  
-# Create the data frame to be fed into the geocoder
-some_addresses <- fl_hoa_src %>%
-  filter(addr_correction==0) %>%  # remove addresses from the src data that were manually corrected
-  select(
-    entity_id,
-    property_address,
-    property_city,
-    property_state,
-    property_zip
-  ) %>%
-  mutate(
-    addr = paste(property_address, property_city, property_state, property_zip, sep = ", ")
-  ) %>%
-  select(entity_id,addr)
-
-library(tidygeocoder)
-
-# Define a function to process batches of data
-geocode_batch <- function(batch) {
-  lat_longs <- batch %>%
-    geocode(addr, 
-            method = "census", 
-            full_results = TRUE, 
-            api_options = list(census_return_type = 'geographies')
-    )
-  return(lat_longs)
-}
-
-# Split the data into chunks of 10,000 rows each
-batch_size <- 10000
-batches <- split(some_addresses, ceiling(seq_along(some_addresses$addr) / batch_size))
-
-# Initialize an empty list to store the results
-all_results <- list()
-  
-# Loop over each batch and geocode it
-for (i in 1:length(batches)) {
-  cat("Processing batch", i, "of", length(batches), "\n")
-  
-  # Process the current batch
-  batch_result <- geocode_batch(batches[[i]])
-  
-  # Store the result in the list
-  all_results[[i]] <- batch_result
-}
-
-# Combine all the batch results into one dataframe
-final_results <- bind_rows(all_results) %>%
-  mutate(
-    GEOID = paste0(
-      ifelse(is.na(state_fips), "", state_fips),  # Handle NA in col1
-      ifelse(is.na(county_fips), "", county_fips),  # Handle NA in col2
-      ifelse(is.na(census_tract), "", census_tract),  # Handle NA in col3
-      ifelse(is.na(census_block), "", substr(census_block, 1, 1))  # Handle NA in col4 and extract first digit
-    )
-  ) %>%
-  select(entity_id,GEOID,addr)
-  
-# Save the result to a CSV
-write.csv(final_results, "geocoded_results.csv", row.names = FALSE)
+   
+ # Create the data frame to be fed into the geocoder
+ some_addresses <- fl_hoa_src %>%
+   filter(addr_correction==0) %>%  # remove addresses from the src data that were manually corrected
+   select(
+     entity_id,
+     property_address,
+     property_city,
+     property_state,
+     property_zip
+   ) %>%
+   mutate(
+     addr = paste(property_address, property_city, property_state, property_zip, sep = ", ")
+   ) %>%
+   select(entity_id,addr)
+ 
+ library(tidygeocoder)
+ 
+ # Define a function to process batches of data
+ geocode_batch <- function(batch) {
+   lat_longs <- batch %>%
+     geocode(addr, 
+             method = "census", 
+             full_results = TRUE, 
+             api_options = list(census_return_type = 'geographies')
+     )
+   return(lat_longs)
+ }
+ 
+ # Split the data into chunks of 10,000 rows each
+ batch_size <- 10000
+ batches <- split(some_addresses, ceiling(seq_along(some_addresses$addr) / batch_size))
+ 
+ # Initialize an empty list to store the results
+ all_results <- list()
+   
+ # Loop over each batch and geocode it
+ for (i in 1:length(batches)) {
+   cat("Processing batch", i, "of", length(batches), "\n")
+   
+   # Process the current batch
+   batch_result <- geocode_batch(batches[[i]])
+   
+   # Store the result in the list
+   all_results[[i]] <- batch_result
+ }
+ 
+ # Combine all the batch results into one dataframe
+ final_results <- bind_rows(all_results) %>%
+   mutate(
+     GEOID = paste0(
+       ifelse(is.na(state_fips), "", state_fips),  # Handle NA in col1
+       ifelse(is.na(county_fips), "", county_fips),  # Handle NA in col2
+       ifelse(is.na(census_tract), "", census_tract),  # Handle NA in col3
+       ifelse(is.na(census_block), "", substr(census_block, 1, 1))  # Handle NA in col4 and extract first digit
+     )
+   ) %>%
+   select(
+     entity_id,
+     GEOID,
+     addr
+     )
+   
+ # Save the result to a CSV
+ write.csv(final_results, "geocoded_results.csv", row.names = FALSE)
 
 ################################################################################
-# STEP 3:  ENRICH THE SOURCE DATA WITH COMPETITION & DEMOGRAPHICS
+# STEP 3:  APPEND THE DATA WITH COMPETITION & DEMOGRAPHICS ATTRIBUTES
 ################################################################################
 
 # Load the demographics file that I created from the census_demos_cbg.R code
@@ -207,12 +226,19 @@ fl_hoa_src_join_2 <- fl_hoa_src_join_1 %>%
   left_join(florida_demographics, by = "GEOID") %>%
   mutate(fcc_match = if_else(!is.na(total_residential_location_ids), 1, 0))
 
+fl_hoa_src_join_3 <- fl_hoa_src_join_2 %>%
+  left_join(competition_by_cbg, by = "GEOID") %>%
+  mutate(
+    spectrum = replace_na(spectrum, 0),
+    comcast = replace_na(comcast, 0)
+  )
+
 ################################################################################
 # STEP 4:  COMPUTE NETWORK PROXIMITY
 ################################################################################
 
 # Remove any records with null lat/lon  
-fl_hoa_src_sf_tranform <- fl_hoa_src_join_2 %>% 
+fl_hoa_src_sf_tranform <- fl_hoa_src_join_3 %>% 
   select(entity_id,latitude,longitude) %>% 
   filter(!is.na(latitude))
 
@@ -251,7 +277,7 @@ processed_df <- pljoin %>%
   st_drop_geometry() 
 
 # Final output
-final_analytic_df <- fl_hoa_src_join_2 %>%
+final_analytic_df <- fl_hoa_src_join_3 %>%
   left_join(processed_df, by = "entity_id") %>%
   mutate(
     dist = as.numeric(dist)
@@ -260,7 +286,7 @@ final_analytic_df <- fl_hoa_src_join_2 %>%
 print(final_analytic_df)
 
 ################################################################################
-# STEP 5:  VISUALLY INSPECT COORDINATES ON A MAP
+# STEP 5:  VISUALLY INSPECT LAT/LON COORDINATES ON A MAP
 ################################################################################
 
 library(leaflet)
@@ -278,7 +304,185 @@ leaflet()  %>%
   )
 
 ################################################################################
-# STEP 6:  RUN EXPLORATORY DATA ANALYSIS ON final_analytic_df
+# STEP 6:  APPEND PAYBACK TO final_analytic_df
+################################################################################
+# Input values
+bulk_arpu <- 35.00
+take_percent <- 0.15
+margin <- 0.65
+cost_per_unit <- 2000.00
+cost_per_foot <- 17.00
+type_ii_cost_per_month <- 2000.00
+#num_units <- 250
+distance_adj <- 1.2
+#network_prox <- 2500
+bulk_arpu_growth <- 1.04
+take_rev_growth <-  0.90
+type_ii_cost_growth <- 1.03
+
+# Offnet Payback Function
+offnet_payback <- function(bulk_arpu, take_percent, margin, cost_per_unit, type_ii_cost_per_month, num_units, years = 10) {
+  # Initialize variables for Year 1
+  initial_bulk_arpu <- bulk_arpu
+  bulk_revenue <- bulk_arpu * 12 * num_units
+  take_revenue <- bulk_revenue * take_percent
+  annual_revenue <- bulk_revenue + take_revenue
+  
+  direct_cost <- annual_revenue * -(1 - margin)
+  type_ii_cost <- type_ii_cost_per_month * 12
+  capex <- cost_per_unit * num_units
+  
+  # Initialize cash flow and cumulative cash flow
+  cash_flows <- numeric(years + 1)
+  cumulative_cf <- numeric(years + 1)
+  
+  # Period 0: Initial Capex (do not include in payback period)
+  cash_flows[1] <- -capex
+  cumulative_cf[1] <- cash_flows[1]
+  
+  # Loop through each year to calculate cash flow, cumulative cash flow, and payback period
+  for (i in 2:(years + 1)) {
+    # Apply annual growth rates starting from Year 2
+    if (i > 2) {
+      bulk_arpu <- bulk_arpu * bulk_arpu_growth  # Increase bulk ARPU by 4% annually
+      bulk_revenue <- bulk_arpu * 12 * num_units  # Recalculate bulk revenue using updated bulk_arpu
+      take_revenue <- take_revenue * take_rev_growth  # Decrease take revenue by 10% annually
+      type_ii_cost <- type_ii_cost * type_ii_cost_growth  # Increase type II cost by 3% annually
+    }
+    
+    # Recalculate annual revenue and direct cost for the current year
+    annual_revenue <- bulk_revenue + take_revenue
+    direct_cost <- annual_revenue * -(1 - margin)
+    
+    # Contribution margin calculation
+    contribution_margin <- annual_revenue - abs(direct_cost) - type_ii_cost
+    
+    # Calculate cash flows and update cumulative cash flow
+    cash_flows[i] <- contribution_margin
+    cumulative_cf[i] <- cumulative_cf[i - 1] + cash_flows[i]
+  }
+  
+  # Determine the first year where cumulative cash flow becomes positive (excluding Year 0)
+  first_positive_year <- which(cumulative_cf >= 0)[1] - 1
+  
+  if (is.na(first_positive_year)) { # Handle case where payback is not achieved
+    return(NA)
+  }
+  
+  # Calculate the fractional year based on remaining cumulative CF in the first positive year
+  remaining <- abs(cumulative_cf[first_positive_year])  # Remaining cumulative CF before full payback
+  next_year_cf <- cash_flows[first_positive_year + 1]  # Cash flow in the next period
+  fractional_year <- remaining / next_year_cf  # Calculate the fractional year
+  
+  # Final payback period calculation, excluding Year 0
+  payback_period <- (first_positive_year + fractional_year) - 1
+  
+  # Return result
+  return(payback_period)
+}
+
+# On-net Payback Function
+onnet_payback <- function(bulk_arpu, take_percent, margin, cost_per_unit, cost_per_foot, num_units, distance_adj, network_prox, years = 10) {
+  # Initialize variables for Year 1
+  initial_bulk_arpu <- bulk_arpu
+  bulk_revenue <- bulk_arpu * 12 * num_units
+  take_revenue <- bulk_revenue * take_percent
+  annual_revenue <- bulk_revenue + take_revenue
+  
+  direct_cost <- annual_revenue * -(1 - margin)
+  non_transport <- num_units * cost_per_unit
+  transport <- network_prox * cost_per_foot * distance_adj
+  capex <- non_transport + transport
+  
+  # Initialize cash flow and cumulative cash flow
+  cash_flows <- numeric(years + 1)
+  cumulative_cf <- numeric(years + 1)
+  
+  # Period 0: Initial Capex (do not include in payback period)
+  cash_flows[1] <- -capex
+  cumulative_cf[1] <- cash_flows[1]
+  
+  # Loop through each year to calculate cash flow, cumulative cash flow, and payback period
+  for (i in 2:(years + 1)) {
+    # Apply annual growth rates starting from Year 2
+    if (i > 2) {
+      bulk_arpu <- bulk_arpu * bulk_arpu_growth  # Increase bulk ARPU by 4% annually
+      bulk_revenue <- bulk_arpu * 12 * num_units  # Recalculate bulk revenue using updated bulk_arpu
+      take_revenue <- take_revenue * take_rev_growth  # Decrease take revenue by 10% annually
+    }
+    
+    # Recalculate annual revenue and direct cost for the current year
+    annual_revenue <- bulk_revenue + take_revenue
+    direct_cost <- annual_revenue * -(1 - margin)
+    
+    # Contribution margin calculation
+    contribution_margin <- annual_revenue - abs(direct_cost)
+    
+    # Calculate cash flows and update cumulative cash flow
+    cash_flows[i] <- contribution_margin
+    cumulative_cf[i] <- cumulative_cf[i - 1] + cash_flows[i]
+  }
+  
+  # Determine the first year where cumulative cash flow becomes positive (excluding Year 0)
+  first_positive_year <- which(cumulative_cf >= 0)[1] - 1
+  
+  if (is.na(first_positive_year)) { # Handle case where payback is not achieved
+    return(NA)
+  }
+  
+  # Calculate the fractional year based on remaining cumulative CF in the first positive year
+  remaining <- abs(cumulative_cf[first_positive_year])  # Remaining cumulative CF before full payback
+  next_year_cf <- cash_flows[first_positive_year + 1]  # Cash flow in the next period
+  fractional_year <- remaining / next_year_cf  # Calculate the fractional year
+  
+  # Final payback period calculation, excluding Year 0
+  payback_period <- (first_positive_year + fractional_year) - 1
+  
+  # Return result
+  return(payback_period)
+}
+
+# Function Calls
+final_analytic_pb <- final_analytic_df %>%
+  rowwise() %>%
+  mutate(
+    offnet_pb = ifelse(
+      !is.na(total_units) & total_units > 0,
+      {
+        payback <- offnet_payback(
+          bulk_arpu = bulk_arpu,
+          take_percent = take_percent,
+          margin = margin,
+          cost_per_unit = cost_per_unit,
+          type_ii_cost_per_month = type_ii_cost_per_month,
+          num_units = total_units
+        )
+      },
+      NA
+    )
+  ) %>%
+  mutate(
+    onnet_pb = ifelse(
+      !is.na(total_units) & total_units > 0 & dist >= 0,
+      {
+        payback <- onnet_payback(
+          bulk_arpu = bulk_arpu,
+          take_percent = take_percent,
+          margin = margin,
+          cost_per_unit = cost_per_unit,
+          cost_per_foot = cost_per_foot,
+          num_units = total_units,
+          distance_adj = distance_adj,
+          network_prox = dist
+        )
+      },
+      NA
+    )
+  ) %>%
+  ungroup()
+
+################################################################################
+# STEP 7:  SCALE DATA & RUN CORRELATION ANALYSIS
 ################################################################################
 
 library(corrplot) 
@@ -292,7 +496,7 @@ theme_set(theme_minimal())
 #   filter(!is.na(median_age) & !is.na(dist))
 
 # Add/remove variables and use complete.cases to remove NAs
-cluster_analytic_df <- final_analytic_df[complete.cases(final_analytic_df[, c(
+cluster_analytic_df <- final_analytic_pb[complete.cases(final_analytic_pb[, c(
  "median_age",
  "dist"
 )]), ]
@@ -333,7 +537,7 @@ corrplot(M,
 )
 
 ################################################################################
-# STEP 7:  PERFORM THE CLUSTER ANALYSIS
+# STEP 8:  CLUSTER ANALYSIS
 ################################################################################
 
 # Create data table of entity_id labels
@@ -346,11 +550,11 @@ fviz_nbclust(corr_df_scaled, kmeans, method = "wss") +
 
 # Method 2:  Determining and visualizing the optimal number of clusters
 # Note that the Silhouette Method requires a lot of memory.
-##fviz_nbclust(corr_df_scaled, kmeans, method = "silhouette") + 
-##  labs(subtitle = "Silhouette Method")
+#fviz_nbclust(corr_df_scaled, kmeans, method = "silhouette") + 
+#  labs(subtitle = "Silhouette Method")
 
 # Compute the clusters
-set.seed(80108)
+set.seed(80108) #Set seed to ensure reproducible modelling results
 km_out <- kmeans(corr_df_scaled, 
                  centers = 4, 
                  nstart = 100)
@@ -362,23 +566,28 @@ print(km_out)
 km_clusters <- km_out$cluster
 rownames(corr_df_scaled) <- paste(cluster_analytic_df$entity_id, 1:dim(cluster_analytic_df)[1], sep = "_")
 par(mar = c(5, 4, 4, 2) + 0.1)  # Default margins
-#Cluster Plot
+
+# Method 1: Visualize cluster output with point geometry
 fviz_cluster(list(data=corr_df_scaled, cluster = km_clusters), geom = "point", ellipse.type = "convex") +
   labs(title = "K-Means Clustering", subtitle = "Cluster Visualization")
 
-# Contribution of variables
+# Method 2: Visualize cluster output excluding point geometry
 #fviz_cluster(list(data=corr_df_scaled, cluster = km_clusters), geom = "arrow") +
 #  labs(title = "Cluster Visualization with Variable Contributions")
 
 # Compute cluster means and inspect results
 table(km_clusters, cluster_analytic_df$entity_id)
+
+# Cluster means function
 seg_sum <- function(data, groups) {
   aggregate(data, list(groups), function(x) mean(as.numeric(x)))
 }
+
+# Call cluster means function and inspect the results
 seg_sum(cluster_analytic_df,km_clusters)
 
 ################################################################################
-# STEP 8:  APPEND CLUSTER SCORES TO final_analytic_df AND SAVE TO CSV
+# STEP 9:  APPEND CLUSTER SCORES AND SAVE TO CSV
 ################################################################################
 
 clus_scores <- km_clusters
@@ -390,18 +599,35 @@ hoa_scored <- tibble(cluster_analytic_df,clus_scores) %>%
 hoa_scored <- as.data.frame(hoa_scored) %>% 
   mutate(entity_id = trimws(as.character(entity_id)))
 
-summit_hoa_sales_list_final <- final_analytic_df %>%
+# Append cluster segment names
+summit_hoa_sales_list_final <- final_analytic_pb %>%
   left_join(hoa_scored, by = "entity_id") %>%
-  mutate(cluster = if_else(is.na(cluster),"Other",cluster))
+  mutate(cluster = if_else(is.na(cluster),"Other",cluster)) %>%
+  mutate(segment_name =
+           ifelse(cluster==1,"Established Retirement Communities",
+            ifelse(cluster==2,"Atlantic Coastal Corridor",
+              ifelse(cluster==3,"Panhandle, Low-Density Competitive Markets",
+                ifelse(cluster==4,"Central and Coastal Near Net Opportunities",
+                       "Other"))))) %>%
+  select(-c(
+    cluster,
+    fips_code,
+    addr,
+    usps_zip_pref_state,
+    county_name,
+    usps_zip_pref_city)
+    )
 
+# Number of rows in final output should equal src data from Step 1.
 nrow(summit_hoa_sales_list_final)
 
+# Write final output to CSV and export results
 write.csv(summit_hoa_sales_list_final, 
-          "SUMMIT_HOA_SALES_LIST_ENHANCED_DEC24_V1.csv", 
+          "SUMMIT_HOA_SALES_LIST_ENHANCED_DEC24_V3.csv", #rename as needed
           row.names = FALSE)
 
 ################################################################################
-# STEP 9:  ALTERNATE METHOD FOR COMPUTING CLUSTER MEANS
+# STEP 10:  OPTIONAL - ALTERNATE METHOD FOR INSPECTING CLUSTER MEANS
 ################################################################################
 
 # Compute means by cluster
