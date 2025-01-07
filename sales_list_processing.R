@@ -473,7 +473,7 @@ final_analytic_pb <- final_analytic_df %>%
           cost_per_foot = cost_per_foot,
           num_units = total_units,
           distance_adj = distance_adj,
-          network_prox = dist
+          network_prox = dist*5280 #Convert miles to feet
         )
       },
       NA
