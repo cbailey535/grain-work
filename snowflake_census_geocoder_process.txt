@@ -1,0 +1,14 @@
+1.  DEV.GRAIN_RAW_SCHEMA.CENSUS_STAGE
+Upload a CSV (no headers, use format below)
+
+1,4600 Silver Hill Rd,Washington,DC,20233
+2,1600 Amphitheatre Parkway,Mountain View,CA,94043
+3,350 5th Ave,New York,NY,10118
+4,1 Microsoft Way,Redmond,WA,98052
+5,221B Baker St,London,UK,NW16XE
+
+2.  Call procedure (change filename as needed)
+CALL CENSUS_GEOGRAPHIES_GEOCODE_FROM_STAGE_TABLE('addresses_file.csv');
+
+3. Results will be placed in the following table:
+DEV.GRAIN_RAW_SCHEMA.GEOCODING_RESULTS
