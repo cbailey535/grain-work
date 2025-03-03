@@ -8,7 +8,7 @@ Upload a CSV (no headers, use format below)
 5,221B Baker St,London,UK,NW16XE
 
 2.  Call procedure (change filename as needed)
-CALL CENSUS_GEOGRAPHIES_GEOCODE_FROM_STAGE_TABLE('addresses_file.csv');
+call CENSUS_GEOGRAPHIES_GEOCODE_FROM_STAGE_batches('batch_test.csv');
 
 3. Results will be placed in the following table:
 DEV.GRAIN_RAW_SCHEMA.GEOCODING_RESULTS
